@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Copyright 2017 Mike Fährmann
+# Copyright 2017-2020 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
 # published by the Free Software Foundation.
 
+import os
+import sys
 import unittest
 from unittest import mock
 
 import logging
 import tempfile
-import http.cookiejar
 from os.path import join
 
-import gallery_dl.config as config
-import gallery_dl.extractor as extractor
-from gallery_dl.extractor.message import Message
-
-CKEY = ("cookies",)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from gallery_dl import config, extractor  # noqa E402
 
 
 class TestCookiejar(unittest.TestCase):
@@ -37,7 +35,7 @@ class TestCookiejar(unittest.TestCase):
         cls.invalid_cookiefile = join(cls.path.name, "invalid.txt")
         with open(cls.invalid_cookiefile, "w") as file:
             file.write("""# asd
-.example.org\tTRUE\t/\tFALSE\t253402210800\tNAME\tVALUE
+.example.org\tTRUE/FALSE\t253402210800\tNAME\tVALUE
 """)
 
     @classmethod
@@ -46,25 +44,25 @@ class TestCookiejar(unittest.TestCase):
         config.clear()
 
     def test_cookiefile(self):
-        config.set(CKEY, self.cookiefile)
+        config.set((), "cookies", self.cookiefile)
 
         cookies = extractor.find("test:").session.cookies
         self.assertEqual(len(cookies), 1)
 
         cookie = next(iter(cookies))
         self.assertEqual(cookie.domain, ".example.org")
-        self.assertEqual(cookie.path, "/")
-        self.assertEqual(cookie.name, "NAME")
-        self.assertEqual(cookie.value, "VALUE")
+        self.assertEqual(cookie.path  , "/")
+        self.assertEqual(cookie.name  , "NAME")
+        self.assertEqual(cookie.value , "VALUE")
 
     def test_invalid_cookiefile(self):
-        self._test_warning(self.invalid_cookiefile, http.cookiejar.LoadError)
+        self._test_warning(self.invalid_cookiefile, ValueError)
 
     def test_invalid_filename(self):
         self._test_warning(join(self.path.name, "nothing"), FileNotFoundError)
 
     def _test_warning(self, filename, exc):
-        config.set(CKEY, filename)
+        config.set((), "cookies", filename)
         log = logging.getLogger("test")
         with mock.patch.object(log, "warning") as mock_warning:
             cookies = extractor.find("test:").session.cookies
@@ -78,7 +76,7 @@ class TestCookiedict(unittest.TestCase):
 
     def setUp(self):
         self.cdict = {"NAME1": "VALUE1", "NAME2": "VALUE2"}
-        config.set(CKEY, self.cdict)
+        config.set((), "cookies", self.cdict)
 
     def tearDown(self):
         config.clear()
@@ -90,10 +88,10 @@ class TestCookiedict(unittest.TestCase):
         self.assertEqual(sorted(cookies.values()), sorted(self.cdict.values()))
 
     def test_domain(self):
-        for category in ["exhentai", "nijie", "sankaku", "seiga"]:
+        for category in ["exhentai", "idolcomplex", "nijie", "seiga"]:
             extr = _get_extractor(category)
             cookies = extr.session.cookies
-            for key in self.cdict.keys():
+            for key in self.cdict:
                 self.assertTrue(key in cookies)
             for c in cookies:
                 self.assertEqual(c.domain, extr.cookiedomain)
@@ -106,14 +104,14 @@ class TestCookieLogin(unittest.TestCase):
 
     def test_cookie_login(self):
         extr_cookies = {
-            "exhentai": ("ipb_member_id", "ipb_pass_hash"),
-            "nijie": ("nemail", "nlogin"),
-            "sankaku": ("login", "pass_hash"),
-            "seiga": ("user_session",),
+            "exhentai"   : ("ipb_member_id", "ipb_pass_hash"),
+            "idolcomplex": ("login", "pass_hash"),
+            "nijie"      : ("nemail", "nlogin"),
+            "seiga"      : ("user_session",),
         }
         for category, cookienames in extr_cookies.items():
             cookies = {name: "value" for name in cookienames}
-            config.set(CKEY, cookies)
+            config.set((), "cookies", cookies)
             extr = _get_extractor(category)
             with mock.patch.object(extr, "_login_impl") as mock_login:
                 extr.login()
@@ -121,9 +119,10 @@ class TestCookieLogin(unittest.TestCase):
 
 
 def _get_extractor(category):
-    for msg in extractor.find("test:" + category):
-        if msg[0] == Message.Queue:
-            return extractor.find(msg[1])
+    for extr in extractor.extractors():
+        if extr.category == category and hasattr(extr, "_login_impl"):
+            url = next(extr._get_tests())[0]
+            return extr.from_url(url)
 
 
 if __name__ == "__main__":

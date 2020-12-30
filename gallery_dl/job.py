@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2015-2018 Mike Fährmann
+# Copyright 2015-2020 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -8,9 +8,9 @@
 
 import sys
 import time
-import json
-import hashlib
+import errno
 import logging
+import collections
 from . import extractor, downloader, postprocessor
 from . import config, text, util, output, exception
 from .extractor.message import Message
@@ -20,64 +20,65 @@ class Job():
     """Base class for Job-types"""
     ulog = None
 
-    def __init__(self, url, parent=None):
-        self.url = url
-        self.extractor = extractor.find(url)
-        if self.extractor is None:
-            raise exception.NoExtractorError(url)
-        self.extractor.log.debug(
-            "Using %s for '%s'", self.extractor.__class__.__name__, url)
+    def __init__(self, extr, parent=None):
+        if isinstance(extr, str):
+            extr = extractor.find(extr)
+        if not extr:
+            raise exception.NoExtractorError()
+        self.extractor = extr
+        self.pathfmt = None
 
-        # url predicates
-        self.pred_url = self._prepare_predicates(
-            "image", [util.UniquePredicate()], True)
+        self._logger_extra = {
+            "job"      : self,
+            "extractor": extr,
+            "path"     : output.PathfmtProxy(self),
+            "keywords" : output.KwdictProxy(self),
+        }
+        extr.log = self._wrap_logger(extr.log)
+        extr.log.debug("Using %s for '%s'", extr.__class__.__name__, extr.url)
 
-        # queue predicates
-        self.pred_queue = self._prepare_predicates(
-            "chapter", [], False)
+        self.status = 0
+        self.pred_url = self._prepare_predicates("image", True)
+        self.pred_queue = self._prepare_predicates("chapter", False)
 
-        # category transfer
-        if parent and parent.extractor.categorytransfer:
-            self.extractor.category = parent.extractor.category
-            self.extractor.subcategory = parent.extractor.subcategory
+        if parent:
+            pextr = parent.extractor
+
+            # transfer (sub)category
+            if pextr.config("category-transfer", pextr.categorytransfer):
+                extr.category = pextr.category
+                extr.subcategory = pextr.subcategory
+
+            # transfer parent directory
+            extr._parentdir = pextr._parentdir
+
+            # reuse connection adapters
+            extr.session.adapters = pextr.session.adapters
 
         # user-supplied metadata
         self.userkwds = self.extractor.config("keywords")
 
     def run(self):
         """Execute or run the job"""
+        sleep = self.extractor.config("sleep-extractor")
+        if sleep:
+            time.sleep(sleep)
         try:
             log = self.extractor.log
             for msg in self.extractor:
                 self.dispatch(msg)
-        except exception.AuthenticationError as exc:
-            msg = str(exc) or "Please provide a valid username/password pair."
-            log.error("Authentication failed: %s", msg)
-        except exception.AuthorizationError:
-            log.error("You do not have permission to access the resource "
-                      "at '%s'", self.url)
-        except exception.NotFoundError as exc:
-            res = str(exc) or "resource (gallery/image/user)"
-            log.error("The %s at '%s' does not exist", res, self.url)
-        except exception.HttpError as exc:
-            err = exc.args[0]
-            if isinstance(err, Exception):
-                err = "{}: {}".format(err.__class__.__name__, err)
-            log.error("HTTP request failed:  %s", err)
-        except exception.FormatError as exc:
-            err, obj = exc.args
-            log.error("Applying %s format string failed:  %s: %s",
-                      obj, err.__class__.__name__, err)
-        except exception.FilterError as exc:
-            err = exc.args[0]
-            log.error("Evaluating filter expression failed:  %s: %s",
-                      err.__class__.__name__, err)
-        except exception.StopExtraction:
-            pass
+        except exception.StopExtraction as exc:
+            if exc.message:
+                log.error(exc.message)
+            self.status |= exc.code
+        except exception.GalleryDLException as exc:
+            log.error("%s: %s", exc.__class__.__name__, exc)
+            self.status |= exc.code
         except OSError as exc:
             log.error("Unable to download data:  %s: %s",
                       exc.__class__.__name__, exc)
             log.debug("", exc_info=True)
+            self.status |= 128
         except Exception as exc:
             log.error(("An unexpected error occurred: %s - %s. "
                        "Please run gallery-dl again with the --verbose flag, "
@@ -85,7 +86,13 @@ class Job():
                        "https://github.com/mikf/gallery-dl/issues ."),
                       exc.__class__.__name__, exc)
             log.debug("", exc_info=True)
-        self.handle_finalize()
+            self.status |= 1
+        except BaseException:
+            self.status |= 1
+            raise
+        finally:
+            self.handle_finalize()
+        return self.status
 
     def dispatch(self, msg):
         """Call the appropriate message handler"""
@@ -104,11 +111,9 @@ class Job():
             if self.pred_queue(url, kwds):
                 self.handle_queue(url, kwds)
 
-        elif msg[0] == Message.Urllist:
-            _, urls, kwds = msg
-            if self.pred_url(urls[0], kwds):
-                self.update_kwdict(kwds)
-                self.handle_urllist(urls, kwds)
+        elif msg[0] == Message.Metadata:
+            self.update_kwdict(msg[1])
+            self.handle_metadata(msg[1])
 
         elif msg[0] == Message.Version:
             if msg[1] != 1:
@@ -117,17 +122,16 @@ class Job():
                 )
             # TODO: support for multiple message versions
 
-    def handle_url(self, url, keywords):
+    def handle_url(self, url, kwdict):
         """Handle Message.Url"""
 
-    def handle_urllist(self, urls, keywords):
-        """Handle Message.Urllist"""
-        self.handle_url(urls[0], keywords)
-
-    def handle_directory(self, keywords):
+    def handle_directory(self, kwdict):
         """Handle Message.Directory"""
 
-    def handle_queue(self, url, keywords):
+    def handle_metadata(self, kwdict):
+        """Handle Message.Metadata"""
+
+    def handle_queue(self, url, kwdict):
         """Handle Message.Queue"""
 
     def handle_finalize(self):
@@ -135,12 +139,18 @@ class Job():
 
     def update_kwdict(self, kwdict):
         """Update 'kwdict' with additional metadata"""
-        kwdict["category"] = self.extractor.category
-        kwdict["subcategory"] = self.extractor.subcategory
+        extr = self.extractor
+        kwdict["category"] = extr.category
+        kwdict["subcategory"] = extr.subcategory
         if self.userkwds:
             kwdict.update(self.userkwds)
 
-    def _prepare_predicates(self, target, predicates, skip=True):
+    def _prepare_predicates(self, target, skip=True):
+        predicates = []
+
+        if self.extractor.config(target + "-unique"):
+            predicates.append(util.UniquePredicate())
+
         pfilter = self.extractor.config(target + "-filter")
         if pfilter:
             try:
@@ -164,6 +174,12 @@ class Job():
 
         return util.build_predicate(predicates)
 
+    def get_logger(self, name):
+        return self._wrap_logger(logging.getLogger(name))
+
+    def _wrap_logger(self, logger):
+        return output.LoggerAdapter(logger, self._logger_extra)
+
     def _write_unsupported(self, url):
         if self.ulog:
             self.ulog.info(url)
@@ -174,24 +190,43 @@ class DownloadJob(Job):
 
     def __init__(self, url, parent=None):
         Job.__init__(self, url, parent)
-        self.log = logging.getLogger("download")
-        self.pathfmt = None
+        self.log = self.get_logger("download")
+        self.blacklist = None
         self.archive = None
         self.sleep = None
+        self.hooks = ()
         self.downloaders = {}
-        self.postprocessors = None
         self.out = output.select()
 
-    def handle_url(self, url, keywords, fallback=None):
+        if parent:
+            self.visited = parent.visited
+            pfmt = parent.pathfmt
+            if pfmt and parent.extractor.config("parent-directory"):
+                self.extractor._parentdir = pfmt.directory
+        else:
+            self.visited = set()
+
+    def handle_url(self, url, kwdict):
         """Download the resource specified in 'url'"""
+        hooks = self.hooks
+        pathfmt = self.pathfmt
+        archive = self.archive
+
         # prepare download
-        self.pathfmt.set_keywords(keywords)
+        pathfmt.set_filename(kwdict)
 
-        if self.postprocessors:
-            for pp in self.postprocessors:
-                pp.prepare(self.pathfmt)
+        if "prepare" in hooks:
+            for callback in hooks["prepare"]:
+                callback(pathfmt)
 
-        if self.pathfmt.exists(self.archive):
+        if archive and archive.check(kwdict):
+            pathfmt.fix_extension()
+            self.handle_skip()
+            return
+
+        if pathfmt.exists():
+            if archive:
+                archive.add(kwdict)
             self.handle_skip()
             return
 
@@ -202,58 +237,95 @@ class DownloadJob(Job):
         if not self.download(url):
 
             # use fallback URLs if available
-            for num, url in enumerate(fallback or (), 1):
+            for num, url in enumerate(kwdict.get("_fallback", ()), 1):
+                util.remove_file(pathfmt.temppath)
                 self.log.info("Trying fallback URL #%d", num)
                 if self.download(url):
                     break
             else:
                 # download failed
-                self.log.error(
-                    "Failed to download %s", self.pathfmt.filename or url)
+                self.status |= 4
+                self.log.error("Failed to download %s",
+                               pathfmt.filename or url)
                 return
 
-        if not self.pathfmt.temppath:
+        if not pathfmt.temppath:
+            if archive:
+                archive.add(kwdict)
             self.handle_skip()
             return
 
         # run post processors
-        if self.postprocessors:
-            for pp in self.postprocessors:
-                pp.run(self.pathfmt)
+        if "file" in hooks:
+            for callback in hooks["file"]:
+                callback(pathfmt)
 
         # download succeeded
-        self.pathfmt.finalize()
-        self.out.success(self.pathfmt.path, 0)
-        if self.archive:
-            self.archive.add(keywords)
+        pathfmt.finalize()
+        self.out.success(pathfmt.path, 0)
         self._skipcnt = 0
+        if archive:
+            archive.add(kwdict)
+        if "after" in hooks:
+            for callback in hooks["after"]:
+                callback(pathfmt)
 
-    def handle_urllist(self, urls, keywords):
-        """Download the resource specified in 'url'"""
-        fallback = iter(urls)
-        url = next(fallback)
-        self.handle_url(url, keywords, fallback)
-
-    def handle_directory(self, keywords):
+    def handle_directory(self, kwdict):
         """Set and create the target directory for downloads"""
         if not self.pathfmt:
-            self.initialize(keywords)
+            self.initialize(kwdict)
         else:
-            self.pathfmt.set_directory(keywords)
+            self.pathfmt.set_directory(kwdict)
+        if "post" in self.hooks:
+            for callback in self.hooks["post"]:
+                callback(self.pathfmt)
 
-    def handle_queue(self, url, keywords):
-        try:
-            self.__class__(url, self).run()
-        except exception.NoExtractorError:
+    def handle_metadata(self, kwdict):
+        """Run postprocessors with metadata from 'kwdict'"""
+        if "metadata" in self.hooks:
+            kwdict["extension"] = "metadata"
+            pathfmt = self.pathfmt
+            pathfmt.set_filename(kwdict)
+            for callback in self.hooks["metadata"]:
+                callback(pathfmt)
+
+    def handle_queue(self, url, kwdict):
+        if url in self.visited:
+            return
+        self.visited.add(url)
+
+        if "_extractor" in kwdict:
+            extr = kwdict["_extractor"].from_url(url)
+        else:
+            extr = extractor.find(url)
+            if extr:
+                if self.blacklist is None:
+                    self.blacklist = self._build_blacklist()
+                if extr.category in self.blacklist:
+                    extr = None
+
+        if extr:
+            self.status |= self.__class__(extr, self).run()
+        else:
             self._write_unsupported(url)
 
     def handle_finalize(self):
-        if self.postprocessors:
-            for pp in self.postprocessors:
-                pp.finalize()
+        pathfmt = self.pathfmt
+        if self.archive:
+            self.archive.close()
+        if pathfmt:
+            self.extractor._store_cookies()
+            if "finalize" in self.hooks:
+                status = self.status
+                for callback in self.hooks["finalize"]:
+                    callback(pathfmt, status)
 
     def handle_skip(self):
-        self.out.skip(self.pathfmt.path)
+        pathfmt = self.pathfmt
+        self.out.skip(pathfmt.path)
+        if "skip" in self.hooks:
+            for callback in self.hooks["skip"]:
+                callback(pathfmt)
         if self._skipexc:
             self._skipcnt += 1
             if self._skipcnt >= self._skipmax:
@@ -264,39 +336,68 @@ class DownloadJob(Job):
         scheme = url.partition(":")[0]
         downloader = self.get_downloader(scheme)
         if downloader:
-            return downloader.download(url, self.pathfmt)
+            try:
+                return downloader.download(url, self.pathfmt)
+            except OSError as exc:
+                if exc.errno == errno.ENOSPC:
+                    raise
+                self.log.warning("%s: %s", exc.__class__.__name__, exc)
+                return False
         self._write_unsupported(url)
         return False
 
     def get_downloader(self, scheme):
         """Return a downloader suitable for 'scheme'"""
-        if scheme == "https":
-            scheme = "http"
         try:
             return self.downloaders[scheme]
         except KeyError:
             pass
 
-        klass = downloader.find(scheme)
-        if klass and config.get(("downloader", scheme, "enabled"), True):
-            instance = klass(self.extractor, self.out)
+        cls = downloader.find(scheme)
+        if cls and config.get(("downloader", cls.scheme), "enabled", True):
+            instance = cls(self)
         else:
             instance = None
             self.log.error("'%s:' URLs are not supported/enabled", scheme)
-        self.downloaders[scheme] = instance
+
+        if cls and cls.scheme == "http":
+            self.downloaders["http"] = self.downloaders["https"] = instance
+        else:
+            self.downloaders[scheme] = instance
         return instance
 
-    def initialize(self, keywords=None):
+    def initialize(self, kwdict=None):
         """Delayed initialization of PathFormat, etc."""
-        self.pathfmt = util.PathFormat(self.extractor)
-        if keywords:
-            self.pathfmt.set_directory(keywords)
-        self.sleep = self.extractor.config("sleep")
+        config = self.extractor.config
+        pathfmt = self.pathfmt = util.PathFormat(self.extractor)
+        if kwdict:
+            pathfmt.set_directory(kwdict)
 
-        skip = self.extractor.config("skip", True)
+        self.sleep = config("sleep")
+        if not config("download", True):
+            # monkey-patch method to do nothing and always return True
+            self.download = pathfmt.fix_extension
+
+        archive = config("archive")
+        if archive:
+            path = util.expand_path(archive)
+            try:
+                if "{" in path:
+                    path = util.Formatter(path).format_map(kwdict)
+                self.archive = util.DownloadArchive(path, self.extractor)
+            except Exception as exc:
+                self.extractor.log.warning(
+                    "Failed to open download archive at '%s' ('%s: %s')",
+                    path, exc.__class__.__name__, exc)
+            else:
+                self.extractor.log.debug("Using download archive '%s'", path)
+
+        skip = config("skip", True)
         if skip:
             self._skipexc = None
-            if isinstance(skip, str):
+            if skip == "enumerate":
+                pathfmt.check_file = pathfmt._enum_file
+            elif isinstance(skip, str):
                 skip, _, smax = skip.partition(":")
                 if skip == "abort":
                     self._skipexc = exception.StopExtraction
@@ -305,51 +406,83 @@ class DownloadJob(Job):
                 self._skipcnt = 0
                 self._skipmax = text.parse_int(smax)
         else:
-            self.pathfmt.exists = lambda x=None: False
+            # monkey-patch methods to always return False
+            pathfmt.exists = lambda x=None: False
+            if self.archive:
+                self.archive.check = pathfmt.exists
 
-        archive = self.extractor.config("archive")
-        if archive:
-            path = util.expand_path(archive)
-            self.archive = util.DownloadArchive(path, self.extractor)
-
-        postprocessors = self.extractor.config("postprocessors")
+        postprocessors = self.extractor.config_accumulate("postprocessors")
         if postprocessors:
-            self.postprocessors = []
+            self.hooks = collections.defaultdict(list)
+            pp_log = self.get_logger("postprocessor")
+            pp_list = []
+            category = self.extractor.category
+            basecategory = self.extractor.basecategory
+
             for pp_dict in postprocessors:
+
                 whitelist = pp_dict.get("whitelist")
-                blacklist = pp_dict.get("blacklist")
-                if (whitelist and self.extractor.category not in whitelist or
-                        blacklist and self.extractor.category in blacklist):
+                if whitelist and category not in whitelist and \
+                        basecategory not in whitelist:
                     continue
+
+                blacklist = pp_dict.get("blacklist")
+                if blacklist and (
+                        category in blacklist or basecategory in blacklist):
+                    continue
+
                 name = pp_dict.get("name")
                 pp_cls = postprocessor.find(name)
                 if not pp_cls:
-                    postprocessor.log.warning("module '%s' not found", name)
+                    pp_log.warning("module '%s' not found", name)
                     continue
                 try:
-                    pp_obj = pp_cls(self.pathfmt, pp_dict)
+                    pp_obj = pp_cls(self, pp_dict)
                 except Exception as exc:
-                    postprocessor.log.error(
-                        "%s: initialization failed: %s %s",
-                        name, exc.__class__.__name__, exc)
+                    pp_log.error("'%s' initialization failed:  %s: %s",
+                                 name, exc.__class__.__name__, exc)
                 else:
-                    self.postprocessors.append(pp_obj)
-            self.extractor.log.debug(
-                "Active postprocessor modules: %s", self.postprocessors)
+                    pp_list.append(pp_obj)
+
+            if pp_list:
+                self.extractor.log.debug(
+                    "Active postprocessor modules: %s", pp_list)
+                if "init" in self.hooks:
+                    for callback in self.hooks["init"]:
+                        callback(pathfmt)
+
+    def _build_blacklist(self):
+        wlist = self.extractor.config("whitelist")
+        if wlist is not None:
+            if isinstance(wlist, str):
+                wlist = wlist.split(",")
+            blist = {e.category for e in extractor._list_classes()}
+            blist.difference_update(wlist)
+            return blist
+
+        blist = self.extractor.config("blacklist")
+        if blist is not None:
+            if isinstance(blist, str):
+                blist = blist.split(",")
+            blist = set(blist)
+        else:
+            blist = {self.extractor.category}
+        blist |= util.SPECIAL_EXTRACTORS
+        return blist
 
 
 class SimulationJob(DownloadJob):
     """Simulate the extraction process without downloading anything"""
 
-    def handle_url(self, url, keywords, fallback=None):
-        self.pathfmt.set_keywords(keywords)
+    def handle_url(self, url, kwdict, fallback=None):
+        self.pathfmt.set_filename(kwdict)
         self.out.skip(self.pathfmt.path)
         if self.sleep:
             time.sleep(self.sleep)
         if self.archive:
-            self.archive.add(keywords)
+            self.archive.add(kwdict)
 
-    def handle_directory(self, keywords):
+    def handle_directory(self, kwdict):
         if not self.pathfmt:
             self.initialize()
 
@@ -357,45 +490,58 @@ class SimulationJob(DownloadJob):
 class KeywordJob(Job):
     """Print available keywords"""
 
-    def handle_url(self, url, keywords):
+    def handle_url(self, url, kwdict):
         print("\nKeywords for filenames and --filter:")
         print("------------------------------------")
-        self.print_keywords(keywords)
+        self.print_kwdict(kwdict)
         raise exception.StopExtraction()
 
-    def handle_directory(self, keywords):
+    def handle_directory(self, kwdict):
         print("Keywords for directory names:")
         print("-----------------------------")
-        self.print_keywords(keywords)
+        self.print_kwdict(kwdict)
 
-    def handle_queue(self, url, keywords):
-        if not keywords:
+    def handle_queue(self, url, kwdict):
+        extr = None
+        if "_extractor" in kwdict:
+            extr = kwdict["_extractor"].from_url(url)
+
+        if not util.filter_dict(kwdict):
             self.extractor.log.info(
-                "This extractor delegates work to other extractors "
-                "and does not provide any keywords on its own. Try "
-                "'gallery-dl -K \"%s\"' instead.", url)
+                "This extractor only spawns other extractors "
+                "and does not provide any metadata on its own.")
+
+            if extr:
+                self.extractor.log.info(
+                    "Showing results for '%s' instead:\n", url)
+                KeywordJob(extr, self).run()
+            else:
+                self.extractor.log.info(
+                    "Try 'gallery-dl -K \"%s\"' instead.", url)
         else:
             print("Keywords for --chapter-filter:")
             print("------------------------------")
-            self.print_keywords(keywords)
-            if self.extractor.categorytransfer:
+            self.print_kwdict(kwdict)
+            if extr or self.extractor.categorytransfer:
                 print()
-                KeywordJob(url, self).run()
+                KeywordJob(extr or url, self).run()
         raise exception.StopExtraction()
 
     @staticmethod
-    def print_keywords(keywords, prefix=""):
-        """Print key-value pairs with formatting"""
+    def print_kwdict(kwdict, prefix=""):
+        """Print key-value pairs in 'kwdict' with formatting"""
         suffix = "]" if prefix else ""
-        for key, value in sorted(keywords.items()):
+        for key, value in sorted(kwdict.items()):
+            if key[0] == "_":
+                continue
             key = prefix + key + suffix
 
             if isinstance(value, dict):
-                KeywordJob.print_keywords(value, key + "[")
+                KeywordJob.print_kwdict(value, key + "[")
 
             elif isinstance(value, list):
                 if value and isinstance(value[0], dict):
-                    KeywordJob.print_keywords(value[0], key + "[][")
+                    KeywordJob.print_kwdict(value[0], key + "[][")
                 else:
                     print(key, "[]", sep="")
                     for val in value:
@@ -417,113 +563,17 @@ class UrlJob(Job):
             self.handle_queue = self.handle_url
 
     @staticmethod
-    def handle_url(url, _):
+    def handle_url(url, kwdict):
         print(url)
-
-    @staticmethod
-    def handle_urllist(urls, _):
-        prefix = ""
-        for url in urls:
-            print(prefix, url, sep="")
-            prefix = "| "
+        if "_fallback" in kwdict:
+            for url in kwdict["_fallback"]:
+                print("|", url)
 
     def handle_queue(self, url, _):
         try:
             UrlJob(url, self, self.depth + 1).run()
         except exception.NoExtractorError:
             self._write_unsupported(url)
-
-
-class TestJob(DownloadJob):
-    """Generate test-results for extractor runs"""
-
-    class HashIO():
-        """Minimal file-like interface"""
-
-        def __init__(self, hashobj):
-            self.hashobj = hashobj
-            self.path = ""
-            self.size = 0
-            self.has_extension = True
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            pass
-
-        def open(self, mode):
-            self.size = 0
-            return self
-
-        def write(self, content):
-            """Update SHA1 hash"""
-            self.size += len(content)
-            self.hashobj.update(content)
-
-        def tell(self):
-            return self.size
-
-        def part_size(self):
-            return 0
-
-    def __init__(self, url, parent=None, content=False):
-        DownloadJob.__init__(self, url, parent)
-        self.content = content
-        self.list_url = []
-        self.list_keyword = []
-        self.list_archive = []
-        self.hash_url = hashlib.sha1()
-        self.hash_keyword = hashlib.sha1()
-        self.hash_archive = hashlib.sha1()
-        self.hash_content = hashlib.sha1()
-        if content:
-            self.fileobj = self.HashIO(self.hash_content)
-            self.get_downloader("http")._check_extension = lambda a, b: None
-
-    def run(self):
-        for msg in self.extractor:
-            self.dispatch(msg)
-
-    def handle_url(self, url, keywords):
-        self.update_url(url)
-        self.update_keyword(keywords)
-        self.update_archive(keywords)
-        self.update_content(url)
-
-    def handle_urllist(self, urls, keywords):
-        self.handle_url(urls[0], keywords)
-
-    def handle_directory(self, keywords):
-        self.update_keyword(keywords, False)
-
-    def handle_queue(self, url, keywords):
-        self.update_url(url)
-        self.update_keyword(keywords)
-
-    def update_url(self, url):
-        """Update the URL hash"""
-        self.list_url.append(url)
-        self.hash_url.update(url.encode())
-
-    def update_keyword(self, kwdict, to_list=True):
-        """Update the keyword hash"""
-        if to_list:
-            self.list_keyword.append(kwdict.copy())
-        self.hash_keyword.update(
-            json.dumps(kwdict, sort_keys=True).encode())
-
-    def update_archive(self, kwdict):
-        """Update the archive-id hash"""
-        archive_id = self.extractor.archive_fmt.format_map(kwdict)
-        self.list_archive.append(archive_id)
-        self.hash_archive.update(archive_id.encode())
-
-    def update_content(self, url):
-        """Update the content hash"""
-        if self.content:
-            scheme = url.partition(":")[0]
-            self.get_downloader(scheme).download(url, self.fileobj)
 
 
 class DataJob(Job):
@@ -533,9 +583,16 @@ class DataJob(Job):
         Job.__init__(self, url, parent)
         self.file = file
         self.data = []
-        self.ascii = config.get(("output", "ascii"), ensure_ascii)
+        self.ascii = config.get(("output",), "ascii", ensure_ascii)
+
+        private = config.get(("output",), "private")
+        self.filter = (lambda x: x) if private else util.filter_dict
 
     def run(self):
+        sleep = self.extractor.config("sleep-extractor")
+        if sleep:
+            time.sleep(sleep)
+
         # collect data
         try:
             for msg in self.extractor:
@@ -547,28 +604,28 @@ class DataJob(Job):
         except BaseException:
             pass
 
-        if config.get(("output", "num-to-str"), False):
+        # convert numbers to string
+        if config.get(("output",), "num-to-str", False):
             for msg in self.data:
                 util.transform_dict(msg[-1], util.number_to_string)
 
         # dump to 'file'
-        json.dump(
-            self.data, self.file,
-            sort_keys=True, indent=2, ensure_ascii=self.ascii,
-        )
-        self.file.write("\n")
+        try:
+            util.dump_json(self.data, self.file, self.ascii, 2)
+            self.file.flush()
+        except Exception:
+            pass
 
-    def handle_url(self, url, keywords):
-        self.data.append((Message.Url, url, keywords.copy()))
+        return 0
 
-    def handle_urllist(self, urls, keywords):
-        self.data.append((Message.Urllist, list(urls), keywords.copy()))
+    def handle_url(self, url, kwdict):
+        self.data.append((Message.Url, url, self.filter(kwdict)))
 
-    def handle_directory(self, keywords):
-        self.data.append((Message.Directory, keywords.copy()))
+    def handle_directory(self, kwdict):
+        self.data.append((Message.Directory, self.filter(kwdict)))
 
-    def handle_queue(self, url, keywords):
-        self.data.append((Message.Queue, url, keywords.copy()))
+    def handle_metadata(self, kwdict):
+        self.data.append((Message.Metadata, self.filter(kwdict)))
 
-    def handle_finalize(self):
-        self.file.close()
+    def handle_queue(self, url, kwdict):
+        self.data.append((Message.Queue, url, self.filter(kwdict)))

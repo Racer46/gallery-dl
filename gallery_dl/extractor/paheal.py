@@ -1,18 +1,18 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2018 Mike Fährmann
+# Copyright 2018-2020 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
 # published by the Free Software Foundation.
 
-"""Extract images from https://rule34.paheal.net/"""
+"""Extractors for https://rule34.paheal.net/"""
 
-from .common import SharedConfigExtractor, Message
+from .common import Extractor, Message
 from .. import text
 
 
-class PahealExtractor(SharedConfigExtractor):
+class PahealExtractor(Extractor):
     """Base class for paheal extractors"""
     basecategory = "booru"
     category = "paheal"
@@ -21,15 +21,18 @@ class PahealExtractor(SharedConfigExtractor):
     root = "https://rule34.paheal.net"
 
     def items(self):
-        yield Message.Version, 1
-        yield Message.Directory, self.get_metadata()
+        self.session.cookies.set(
+            "ui-tnc-agreed", "true", domain="rule34.paheal.net")
+        data = self.get_metadata()
 
-        for data in self.get_posts():
-            url = data["file_url"]
+        for post in self.get_posts():
+            url = post["file_url"]
             for key in ("id", "width", "height"):
-                data[key] = text.parse_int(data[key])
-            data["tags"] = text.unquote(data["tags"])
-            yield Message.Url, url, text.nameext_from_url(url, data)
+                post[key] = text.parse_int(post[key])
+            post["tags"] = text.unquote(post["tags"])
+            post.update(data)
+            yield Message.Directory, post
+            yield Message.Url, url, text.nameext_from_url(url, post)
 
     def get_metadata(self):
         """Return general metadata"""
@@ -42,21 +45,21 @@ class PahealExtractor(SharedConfigExtractor):
 class PahealTagExtractor(PahealExtractor):
     """Extractor for images from rule34.paheal.net by search-tags"""
     subcategory = "tag"
-    directory_fmt = ["{category}", "{tags}"]
-    pattern = [r"(?:https?://)?(?:rule34|rule63|cosplay)\.paheal\.net"
-               r"/post/list/([^/?&#]+)"]
-    test = [("https://rule34.paheal.net/post/list/k-on/1", {
-        "url": "0f5a777cea524635760de32dd85a3de5ac5f3f43",
-        "keyword": "fddaa6329bae5b99e8a666eeeb1cb7721d21bf6d",
-    })]
+    directory_fmt = ("{category}", "{search_tags}")
+    pattern = (r"(?:https?://)?(?:rule34|rule63|cosplay)\.paheal\.net"
+               r"/post/list/([^/?#]+)")
+    test = ("https://rule34.paheal.net/post/list/Ayane_Suzuki/1", {
+        "pattern": r"https://[^.]+\.paheal\.net/_images/\w+/\d+%20-%20",
+        "count": ">= 15"
+    })
     per_page = 70
 
     def __init__(self, match):
-        PahealExtractor.__init__(self)
+        PahealExtractor.__init__(self, match)
         self.tags = text.unquote(match.group(1))
 
     def get_metadata(self):
-        return {"tags": self.tags}
+        return {"search_tags": self.tags}
 
     def get_posts(self):
         pnum = 1
@@ -65,7 +68,7 @@ class PahealTagExtractor(PahealExtractor):
             page = self.request(url).text
 
             for post in text.extract_iter(
-                    page, '<img id="thumb_', '>Image Only<'):
+                    page, '<img id="thumb_', 'Only</a>'):
                 yield self._extract_data(post)
 
             if ">Next<" not in page:
@@ -79,7 +82,8 @@ class PahealTagExtractor(PahealExtractor):
         md5 , pos = text.extract(post, '/_thumbs/', '/', pos)
         url , pos = text.extract(post, '<a href="', '"', pos)
 
-        tags, dimensions, size, _ = data.split(" // ")
+        tags, data, date = data.split("\n")
+        dimensions, size, ext = data.split(" // ")
         width, _, height = dimensions.partition("x")
 
         return {
@@ -92,16 +96,16 @@ class PahealTagExtractor(PahealExtractor):
 class PahealPostExtractor(PahealExtractor):
     """Extractor for single images from rule34.paheal.net"""
     subcategory = "post"
-    pattern = [r"(?:https?://)?(?:rule34|rule63|cosplay)\.paheal\.net"
-               r"/post/view/(\d+)"]
-    test = [("https://rule34.paheal.net/post/view/481609", {
-        "url": "3aa2189c8d1fa952a4d3420def93fd2bd54d6741",
-        "keyword": "d7a0bd6d8b0a5bd8300857044ed2d53d481d37cf",
+    pattern = (r"(?:https?://)?(?:rule34|rule63|cosplay)\.paheal\.net"
+               r"/post/view/(\d+)")
+    test = ("https://rule34.paheal.net/post/view/481609", {
+        "url": "a91d579be030753282f55b8cb4eeaa89c45a9116",
+        "keyword": "e02e4dcf8cdf4e9c206e695253c9024d79a2e20a",
         "content": "7b924bcf150b352ac75c9d281d061e174c851a11",
-    })]
+    })
 
     def __init__(self, match):
-        PahealExtractor.__init__(self)
+        PahealExtractor.__init__(self, match)
         self.post_id = match.group(1)
 
     def get_posts(self):

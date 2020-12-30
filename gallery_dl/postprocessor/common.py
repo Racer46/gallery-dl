@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2018 Mike Fährmann
+# Copyright 2018-2020 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -8,18 +8,13 @@
 
 """Common classes and constants used by postprocessor modules."""
 
-from . import log
-
 
 class PostProcessor():
     """Base class for postprocessors"""
-    log = log
 
-    def prepare(self, pathfmt):
-        """ """
+    def __init__(self, job):
+        name = self.__class__.__name__[:-2].lower()
+        self.log = job.get_logger("postprocessor." + name)
 
-    def run(self, pathfmt):
-        """Execute the postprocessor for a file"""
-
-    def finalize(self):
-        """Cleanup"""
+    def __repr__(self):
+        return self.__class__.__name__

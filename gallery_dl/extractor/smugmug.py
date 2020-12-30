@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2018 Mike Fährmann
+# Copyright 2018-2020 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -21,6 +21,7 @@ class SmugmugExtractor(Extractor):
     category = "smugmug"
     filename_fmt = ("{category}_{User[NickName]:?/_/}"
                     "{Image[UploadKey]}_{Image[ImageKey]}.{extension}")
+    cookiedomain = None
     empty_user = {
         "Uri": "",
         "ResponseLevel": "Public",
@@ -33,43 +34,57 @@ class SmugmugExtractor(Extractor):
         "Uris": None,
     }
 
-    def __init__(self):
-        Extractor.__init__(self)
+    def __init__(self, match):
+        Extractor.__init__(self, match)
         self.api = SmugmugAPI(self)
+        self.videos = self.config("videos", True)
+        self.session = self.api.session
 
-    @staticmethod
-    def _apply_largest(image, delete=True):
-        largest = image["Uris"]["LargestImage"]
-        if delete:
-            del image["Uris"]
-        for key in ("Url", "Width", "Height", "MD5", "Size", "Watermarked"):
-            if key in largest:
-                image[key] = largest[key]
+    def _select_format(self, image):
+        details = image["Uris"]["ImageSizeDetails"]
+        media = None
+
+        if self.videos and image["IsVideo"]:
+            fltr = "VideoSize"
+        elif "ImageSizeOriginal" in details:
+            media = details["ImageSizeOriginal"]
+        else:
+            fltr = "ImageSize"
+
+        if not media:
+            sizes = filter(lambda s: s[0].startswith(fltr), details.items())
+            media = max(sizes, key=lambda s: s[1]["Width"])[1]
+        del image["Uris"]
+
+        for key in ("Url", "Width", "Height", "MD5", "Size", "Watermarked",
+                    "Bitrate", "Duration"):
+            if key in media:
+                image[key] = media[key]
         return image["Url"]
 
 
 class SmugmugAlbumExtractor(SmugmugExtractor):
     """Extractor for smugmug albums"""
     subcategory = "album"
-    directory_fmt = ["{category}", "{User[NickName]}", "{Album[Name]}"]
+    directory_fmt = ("{category}", "{User[NickName]}", "{Album[Name]}")
     archive_fmt = "a_{Album[AlbumKey]}_{Image[ImageKey]}"
-    pattern = [r"smugmug:album:([^:]+)$"]
-    test = [
-        ("smugmug:album:ddvxpg", {
-            "url": "0429e9bf50ee600674e448934e3882ca1761ae7b",
+    pattern = r"smugmug:album:([^:]+)$"
+    test = (
+        ("smugmug:album:cr4C7f", {
+            "url": "1436ee98d5797b308ecce5862e4885944f59c03c",
         }),
         # empty
-        ("smugmug:album:SXvjbW", {
+        ("smugmug:album:Fb7hMs", {
             "count": 0,
         }),
         # no "User"
         ("smugmug:album:6VRT8G", {
             "url": "c4a0f4c4bfd514b93cbdeb02b3345bf7ef6604df",
         }),
-    ]
+    )
 
     def __init__(self, match):
-        SmugmugExtractor.__init__(self)
+        SmugmugExtractor.__init__(self, match)
         self.album_id = match.group(1)
 
     def items(self):
@@ -83,8 +98,8 @@ class SmugmugAlbumExtractor(SmugmugExtractor):
         yield Message.Version, 1
         yield Message.Directory, data
 
-        for image in self.api.album_images(self.album_id, "LargestImage"):
-            url = self._apply_largest(image)
+        for image in self.api.album_images(self.album_id, "ImageSizeDetails"):
+            url = self._select_format(image)
             data["Image"] = image
             yield Message.Url, url, text.nameext_from_url(url, data)
 
@@ -92,33 +107,30 @@ class SmugmugAlbumExtractor(SmugmugExtractor):
 class SmugmugImageExtractor(SmugmugExtractor):
     """Extractor for individual smugmug images"""
     subcategory = "image"
-    directory_fmt = ["{category}", "{User[NickName]}"]
     archive_fmt = "{Image[ImageKey]}"
-    pattern = [BASE_PATTERN + r"(?:/[^/?&#]+)+/i-([^/?&#]+)"]
-    test = [
-        ("https://acapella.smugmug.com/Micro-Macro/Drops/i-g2Dmf9z", {
-            "url": "78f0bf3516b6d670b7319216bdeccb35942ca4cf",
-            "keyword": "8ebb25fb493d3cd5cfcb8f3a4601fa721afe1d83",
-            "content": "64a8f69a1d824921eebbdf2420087937adfa45cd",
+    pattern = BASE_PATTERN + r"(?:/[^/?#]+)+/i-([^/?#-]+)"
+    test = (
+        ("https://tdm.smugmug.com/Nature/Dove/i-kCsLJT6", {
+            "url": "f624ad7293afd6412a7d34e3950a118596c36c85",
+            "keyword": "d69c69c1517b8ea77bc763cffc4d0a4002dfee3f",
+            "content": "ecbd9d7b4f75a637abc8d35319be9ec065a44eb0",
         }),
-        # no "ImageOwner"
-        ("https://www.smugmug.com/gallery/n-GLCjnD/i-JD62fQk", {
-            "url": "d4047637947b35e4ef49e3c7cb70303cc224a3a0",
-            "keyword": "96fc43bc3081f6356c929be43ab5971009975063",
+        # video
+        ("https://tstravels.smugmug.com/Dailies/Daily-Dose-2015/i-39JFNzB", {
+            "url": "04d0ab1ff829ca7d78f5acb5548953df08e9a5ee",
+            "keyword": "720da317232504f05099da37802ed3c3ce3cd310",
         }),
-    ]
+    )
 
     def __init__(self, match):
-        SmugmugExtractor.__init__(self)
+        SmugmugExtractor.__init__(self, match)
         self.image_id = match.group(3)
 
     def items(self):
-        image = self.api.image(self.image_id, "LargestImage,ImageOwner")
-        user = image["Uris"].get("ImageOwner") or self.empty_user.copy()
-        url = self._apply_largest(image)
+        image = self.api.image(self.image_id, "ImageSizeDetails")
+        url = self._select_format(image)
 
-        del user["Uris"]
-        data = {"Image": image, "User": user}
+        data = {"Image": image}
         text.nameext_from_url(url, data)
 
         yield Message.Version, 1
@@ -129,31 +141,32 @@ class SmugmugImageExtractor(SmugmugExtractor):
 class SmugmugPathExtractor(SmugmugExtractor):
     """Extractor for smugmug albums from URL paths and users"""
     subcategory = "path"
-    pattern = [BASE_PATTERN + r"((?:/[^/?&#a-fh-mo-z][^/?&#]*)*)/?$"]
-    test = [
-        ("https://acapella.smugmug.com/Micro-Macro/Drops/", {
-            "pattern": "smugmug:album:ddvxpg$",
+    pattern = BASE_PATTERN + r"((?:/[^/?#a-fh-mo-z][^/?#]*)*)/?$"
+    test = (
+        ("https://tdm.smugmug.com/Nature/Dove", {
+            "pattern": "smugmug:album:cr4C7f$",
         }),
-        ("https://acapella.smugmug.com/", {
-            "pattern": r"smugmug:album:\w+$",
-            "url": "797eb1cbbf5ad8ecac8ee4eedc6466ed77a65d68",
+        ("https://tdm.smugmug.com/", {
+            "pattern": SmugmugAlbumExtractor.pattern,
+            "url": "1640028712875b90974e5aecd91b60e6de6138c7",
         }),
         # gallery node without owner
         ("https://www.smugmug.com/gallery/n-GLCjnD/", {
             "pattern": "smugmug:album:6VRT8G$",
         }),
         # custom domain
-        ("smugmug:www.creativedogportraits.com/PortfolioGallery/", {
-            "pattern": "smugmug:album:txWXzs$",
+        ("smugmug:www.sitkapics.com/TREES-and-TRAILS/", {
+            "pattern": "smugmug:album:ct8Nds$",
         }),
-        ("smugmug:www.creativedogportraits.com/", {
-            "pattern": "smugmug:album:txWXzs$",
+        ("smugmug:www.sitkapics.com/", {
+            "pattern": r"smugmug:album:\w{6}$",
+            "count": ">= 14",
         }),
-        ("smugmug:https://www.creativedogportraits.com/", None),
-    ]
+        ("smugmug:https://www.sitkapics.com/"),
+    )
 
     def __init__(self, match):
-        SmugmugExtractor.__init__(self)
+        SmugmugExtractor.__init__(self, match)
         self.domain, self.user, self.path = match.groups()
 
     def items(self):
@@ -178,11 +191,13 @@ class SmugmugPathExtractor(SmugmugExtractor):
 
             for node in nodes:
                 album_id = node["Uris"]["Album"].rpartition("/")[2]
+                node["_extractor"] = SmugmugAlbumExtractor
                 yield Message.Queue, "smugmug:album:" + album_id, node
 
         else:
             for album in self.api.user_albums(self.user):
                 uri = "smugmug:album:" + album["AlbumKey"]
+                album["_extractor"] = SmugmugAlbumExtractor
                 yield Message.Queue, uri, album
 
     def album_nodes(self, root):
@@ -246,11 +261,9 @@ class SmugmugAPI(oauth.OAuth1API):
         if data["Code"] == 404:
             raise exception.NotFoundError()
         if data["Code"] == 429:
-            self.log.error("Rate limit reached")
-        else:
-            self.log.error("API request failed")
-            self.log.debug(data)
-        raise exception.StopExtraction()
+            raise exception.StopExtraction("Rate limit reached")
+        self.log.debug(data)
+        raise exception.StopExtraction("API request failed")
 
     def _expansion(self, endpoint, expands, params=None):
         endpoint = self._extend(endpoint, expands)

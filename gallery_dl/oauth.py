@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2018 Mike Fährmann
+# Copyright 2018-2020 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -20,6 +20,7 @@ import requests
 import requests.auth
 
 from . import text
+from .cache import cache
 
 
 def nonce(size, alphabet=string.ascii_letters):
@@ -115,18 +116,28 @@ class OAuth1API():
         api_secret = extractor.config("api-secret", self.API_SECRET)
         token = extractor.config("access-token")
         token_secret = extractor.config("access-token-secret")
+        key_type = "default" if api_key == self.API_KEY else "custom"
+
+        if token is None or token == "cache":
+            key = (extractor.category, api_key)
+            token, token_secret = _token_cache(key)
 
         if api_key and api_secret and token and token_secret:
-            self.log.debug("Using OAuth1.0 authentication")
+            self.log.debug("Using %s OAuth1.0 authentication", key_type)
             self.session = OAuth1Session(
                 api_key, api_secret, token, token_secret)
             self.api_key = None
         else:
-            self.log.debug("Using api_key authentication")
+            self.log.debug("Using %s api_key authentication", key_type)
             self.session = extractor.session
             self.api_key = api_key
 
-    def request(self, url, method="GET", *, expect=range(400, 500), **kwargs):
-        kwargs["expect"] = expect
+    def request(self, url, **kwargs):
+        kwargs["fatal"] = None
         kwargs["session"] = self.session
-        return self.extractor.request(url, method, **kwargs)
+        return self.extractor.request(url, **kwargs)
+
+
+@cache(maxage=100*365*24*3600, keyarg=0)
+def _token_cache(key):
+    return None, None

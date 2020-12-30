@@ -2,8 +2,8 @@
 gallery-dl
 ==========
 
-*gallery-dl* is a command-line program to download image-galleries and
--collections from several image hosting sites (see `Supported Sites`_).
+*gallery-dl* is a command-line program to download image galleries and
+collections from several image hosting sites (see `Supported Sites`_).
 It is a cross-platform tool with many configuration options
 and powerful filenaming capabilities.
 
@@ -35,18 +35,24 @@ easily installed or upgraded using pip_:
 
 .. code:: bash
 
-    $ pip install --upgrade gallery-dl
+    $ python3 -m pip install -U gallery-dl
 
-Installing the latest dev-version directly from GitHub can be done with
+Installing the latest dev version directly from GitHub can be done with
 pip_ as well:
 
 .. code:: bash
 
-    $ pip install --upgrade https://github.com/mikf/gallery-dl/archive/master.zip
+    $ python3 -m pip install -U -I --no-deps --no-cache-dir https://github.com/mikf/gallery-dl/archive/master.tar.gz
 
-Be sure the Python interpreter used for pip_ is version 3.4 or higher.
-You might have to use :code:`pip3` or :code:`python3 -m pip`
-depending on your system's defaults.
+Note: Windows users should use :code:`py -3` instead of :code:`python3`.
+
+| It is advised to use the latest version of pip_,
+  including the essential packages :code:`setuptools` and :code:`wheel`.
+| To ensure that these packages are up-to-date, run
+
+.. code:: bash
+
+    $ python3 -m pip install --upgrade pip setuptools wheel
 
 
 From Source
@@ -61,24 +67,55 @@ Navigate into the respective directory and run the :code:`setup.py` file.
 
 .. code:: bash
 
-    $ wget https://github.com/mikf/gallery-dl/archive/master.zip
-    $ unzip master.zip
+    $ wget https://github.com/mikf/gallery-dl/archive/master.tar.gz
+    $ tar -xf master.tar.gz
     # or
     $ git clone https://github.com/mikf/gallery-dl.git
 
-    $ cd gallery-dl
-    $ python setup.py install
+    $ cd gallery-dl*
+    $ python3 setup.py install
 
 
-Standalone Executable (Windows only)
-------------------------------------
+Standalone Executable
+---------------------
 
-Windows users can download a `standalone executable`_, which comes with a
-Python 3.4 interpreter and all required packages included.
+Download a standalone executable file,
+put it into your `PATH <https://en.wikipedia.org/wiki/PATH_(variable)>`__,
+and run it inside a command prompt (like ``cmd.exe``).
 
-Put this file in your `PATH <https://en.wikipedia.org/wiki/PATH_(variable)>`__
-or use it from the current directory and you are good to go,
+- `Windows <https://github.com/mikf/gallery-dl/releases/download/v1.16.1/gallery-dl.exe>`__
+- `Linux   <https://github.com/mikf/gallery-dl/releases/download/v1.16.1/gallery-dl.bin>`__
 
+These executables include a Python interpreter
+and all required Python packages.
+
+
+Snap
+----
+
+Linux users that are using a distro that is supported by Snapd_ can install *gallery-dl* from the Snap Store:
+
+.. code:: bash
+
+    $ snap install gallery-dl
+
+Chocolatey
+----------
+
+Windows users that have Chocolatey_ installed can install *gallery-dl* from the Chocolatey Community Packages repository:
+
+.. code:: powershell
+
+    $ choco install gallery-dl
+
+Scoop
+----------
+
+Apart from Chocolatey, *gallery-dl* is also available in Scoop_ "main" bucket for Windows users.
+
+.. code:: powershell
+
+    $ scoop install gallery-dl
 
 Usage
 =====
@@ -100,14 +137,21 @@ Download images; in this case from danbooru via tag search for 'bonocho':
 
 .. code:: bash
 
-    $ gallery-dl http://danbooru.donmai.us/posts?tags=bonocho
+    $ gallery-dl "https://danbooru.donmai.us/posts?tags=bonocho"
 
 
 Get the direct URL of an image from a site that requires authentication:
 
 .. code:: bash
 
-    $ gallery-dl -g -u <username> -p <password> http://seiga.nicovideo.jp/seiga/im3211703
+    $ gallery-dl -g -u "<username>" -p "<password>" "https://seiga.nicovideo.jp/seiga/im3211703"
+
+
+Filter manga chapters by language and chapter number:
+
+.. code:: bash
+
+    $ gallery-dl --chapter-filter "lang == 'fr' and 10 <= chapter < 20" "https://mangadex.org/title/2354/"
 
 
 | Search a remote resource for URLs and download images from them:
@@ -115,7 +159,15 @@ Get the direct URL of an image from a site that requires authentication:
 
 .. code:: bash
 
-    $ gallery-dl r:https://pastebin.com/raw/FLwrCYsT
+    $ gallery-dl "r:https://pastebin.com/raw/FLwrCYsT"
+
+
+If a site's address is nonstandard for its extractor, you can prefix the URL with the
+extractor's name to force the use of a specific extractor:
+
+.. code:: bash
+
+    $ gallery-dl "tumblr:https://sometumblrblog.example"
 
 
 Configuration
@@ -129,21 +181,29 @@ Configuration files for *gallery-dl* use a JSON-based file format.
   see gallery-dl-example.conf_.
 | A list of all available configuration options and their
   descriptions can be found in configuration.rst_.
+|
 
 *gallery-dl* searches for configuration files in the following places:
 
-+--------------------------------------------+------------------------------------------+
-| Linux                                      | Windows                                  |
-+--------------------------------------------+------------------------------------------+
-|* ``/etc/gallery-dl.conf``                  |*                                         |
-|* ``${HOME}/.config/gallery-dl/config.json``|* ``%USERPROFILE%\gallery-dl\config.json``|
-|* ``${HOME}/.gallery-dl.conf``              |* ``%USERPROFILE%\gallery-dl.conf``       |
-+--------------------------------------------+------------------------------------------+
+Windows:
+    * ``%APPDATA%\gallery-dl\config.json``
+    * ``%USERPROFILE%\gallery-dl\config.json``
+    * ``%USERPROFILE%\gallery-dl.conf``
 
-(``%USERPROFILE%`` usually refers to the user's home directory,
-i.e. ``C:\Users\<username>\``)
+    (``%USERPROFILE%`` usually refers to the user's home directory,
+    i.e. ``C:\Users\<username>\``)
+
+Linux, macOS, etc.:
+    * ``/etc/gallery-dl.conf``
+    * ``${HOME}/.config/gallery-dl/config.json``
+    * ``${HOME}/.gallery-dl.conf``
 
 Values in later configuration files will override previous ones.
+
+Command line options will override all related settings in the configuration file(s),
+e.g. using ``--write-metadata`` will enable writing metadata using the default values
+for all ``postprocessors.metadata.*`` settings, overriding any specific settings in
+configuration files.
 
 
 Authentication
@@ -152,25 +212,35 @@ Authentication
 Username & Password
 -------------------
 
-Some extractors require you to provide valid login-credentials in the form of
-a username & password pair.
-This is necessary for ``pixiv``, ``nijie`` and ``seiga`` and optional
-(but strongly recommended) for ``exhentai``,  ``sankaku``, ``idolcomplex``
-and ``wallhaven``.
+Some extractors require you to provide valid login credentials in the form of
+a username & password pair. This is necessary for
+``pixiv``, ``nijie``, and ``seiga``
+and optional for
+``aryion``,
+``danbooru``,
+``e621``,
+``exhentai``,
+``idolcomplex``,
+``inkbunny``,
+``instagram``,
+``luscious``,
+``pinterest``,
+``sankaku``,
+``subscribestar``,
+``tsumino``,
+and ``twitter``.
 
 You can set the necessary information in your configuration file
 (cf. gallery-dl.conf_)
 
-.. code::
+.. code:: json
 
     {
         "extractor": {
-            ...
             "pixiv": {
                 "username": "<username>",
                 "password": "<password>"
             }
-            ...
         }
     }
 
@@ -183,6 +253,49 @@ or you can provide them directly via the
     $ gallery-dl -u <username> -p <password> URL
     $ gallery-dl -o username=<username> -o password=<password> URL
 
+Cookies
+-------
+
+For sites where login with username & password is not possible due to
+CAPTCHA or similar, or has not been implemented yet, you can use the
+cookies from a browser login session and input them into *gallery-dl*.
+
+This can be done via the
+`cookies <https://github.com/mikf/gallery-dl/blob/master/docs/configuration.rst#extractorcookies>`__
+option in your configuration file by specifying
+
+- | the path to a Mozilla/Netscape format cookies.txt file exported by a browser addon
+  | (e.g. `Get cookies.txt <https://chrome.google.com/webstore/detail/get-cookiestxt/bgaddhkoddajcdgocldbbfleckgcbcid/>`__ for Chrome,
+    `Export Cookies <https://addons.mozilla.org/en-US/firefox/addon/export-cookies-txt/>`__ for Firefox)
+
+- | a list of name-value pairs gathered from your browser's web developer tools
+  | (in `Chrome <https://developers.google.com/web/tools/chrome-devtools/storage/cookies>`__,
+     in `Firefox <https://developer.mozilla.org/en-US/docs/Tools/Storage_Inspector>`__)
+
+For example:
+
+.. code:: json
+
+    {
+        "extractor": {
+            "instagram": {
+                "cookies": "$HOME/path/to/cookies.txt"
+            },
+            "patreon": {
+                "cookies": {
+                    "session_id": "K1T57EKu19TR49C51CDjOJoXNQLF7VbdVOiBrC9ye0a"
+                }
+            }
+        }
+    }
+
+You can also specify a cookies.txt file with
+the :code:`--cookies` command-line option:
+
+.. code:: bash
+
+    $ gallery-dl --cookies "$HOME/path/to/cookies.txt" URL
+
 OAuth
 -----
 
@@ -193,14 +306,14 @@ to issue requests on your account's behalf and enables it to access resources
 which would otherwise be unavailable to a public user.
 
 To link your account to *gallery-dl*, start by invoking it with
-``oauth:<site-name>`` as an argument. For example:
+``oauth:<sitename>`` as an argument. For example:
 
 .. code:: bash
 
     $ gallery-dl oauth:flickr
 
 You will be sent to the site's authorization page and asked to grant read
-access to *gallery-dl*. Authorize it and you will he shown one or more
+access to *gallery-dl*. Authorize it and you will be shown one or more
 "tokens", which should be added to your configuration file.
 
 
@@ -208,23 +321,26 @@ access to *gallery-dl*. Authorize it and you will he shown one or more
 .. _gallery-dl-example.conf: https://github.com/mikf/gallery-dl/blob/master/docs/gallery-dl-example.conf
 .. _configuration.rst:       https://github.com/mikf/gallery-dl/blob/master/docs/configuration.rst
 .. _Supported Sites:         https://github.com/mikf/gallery-dl/blob/master/docs/supportedsites.rst
-.. _standalone executable:   https://github.com/mikf/gallery-dl/releases/download/v1.6.1/gallery-dl.exe
-.. _stable:                  https://github.com/mikf/gallery-dl/archive/v1.6.1.zip
-.. _dev:                     https://github.com/mikf/gallery-dl/archive/master.zip
+.. _stable:                  https://github.com/mikf/gallery-dl/archive/v1.16.1.tar.gz
+.. _dev:                     https://github.com/mikf/gallery-dl/archive/master.tar.gz
 
 .. _Python:     https://www.python.org/downloads/
 .. _PyPI:       https://pypi.org/
 .. _pip:        https://pip.pypa.io/en/stable/
-.. _Requests:   http://docs.python-requests.org/en/master/
+.. _Requests:   https://requests.readthedocs.io/en/master/
 .. _FFmpeg:     https://www.ffmpeg.org/
-.. _youtube-dl: https://rg3.github.io/youtube-dl/
+.. _youtube-dl: https://ytdl-org.github.io/youtube-dl/
+.. _pyOpenSSL:  https://pyopenssl.org/
+.. _Snapd:      https://docs.snapcraft.io/installing-snapd
 .. _OAuth:      https://en.wikipedia.org/wiki/OAuth
+.. _Chocolatey: https://chocolatey.org/install
+.. _Scoop:      https://scoop.sh
 
 .. |pypi| image:: https://img.shields.io/pypi/v/gallery-dl.svg
     :target: https://pypi.org/project/gallery-dl/
 
-.. |build| image:: https://travis-ci.org/mikf/gallery-dl.svg?branch=master
-    :target: https://travis-ci.org/mikf/gallery-dl
+.. |build| image:: https://github.com/mikf/gallery-dl/workflows/tests/badge.svg
+    :target: https://github.com/mikf/gallery-dl/actions
 
 .. |gitter| image:: https://badges.gitter.im/gallery-dl/main.svg
     :target: https://gitter.im/gallery-dl/main

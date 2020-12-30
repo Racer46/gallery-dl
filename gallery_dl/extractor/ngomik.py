@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2018 Mike Fährmann
+# Copyright 2018-2019 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -10,28 +10,29 @@
 
 from .common import ChapterExtractor
 from .. import text
+import re
 
 
 class NgomikChapterExtractor(ChapterExtractor):
     """Extractor for manga-chapters from ngomik.in"""
     category = "ngomik"
     root = "http://ngomik.in"
-    pattern = [r"(?:https?://)?(?:www\.)?ngomik\.in"
-               r"/manga/([^/?&#]+/chapter-[^/?&#]+)"]
-    test = [(("http://ngomik.in/manga/chuuko-demo-koi-ga-shitai"
-              "/chapter-21-5?style=list"), {
-        "url": "e87ed713f31d576013f179b50b4e10d7c678e53a",
-        "keyword": "a774caea148fc18a7d889f453dadbe3def9e0c2c",
-    })]
+    pattern = (r"(?:https?://)?(?:www\.)?ngomik\.in"
+               r"(/[^/?#]+-chapter-[^/?#]+)")
+    test = (
+        ("https://www.ngomik.in/14-sai-no-koi-chapter-1-6/", {
+            "url": "8e67fdf751bbc79bc6f4dead7675008ddb8e32a4",
+            "keyword": "204d177f09d438fd50c9c28d98c73289194640d8",
+        }),
+        ("https://ngomik.in/break-blade-chapter-26/", {
+            "count": 34,
+        }),
+    )
 
-    def __init__(self, match):
-        url = "{}/manga/{}?style=list".format(self.root, match.group(1))
-        ChapterExtractor.__init__(self, url)
-
-    def get_metadata(self, page):
+    def metadata(self, page):
         info = text.extract(page, '<title>', "</title>")[0]
-        manga, chapter, _ = info.split(" - ")
-        chapter, sep, minor = chapter.rpartition(" ")[2].partition(".")
+        manga, _, chapter = info.partition(" Chapter ")
+        chapter, sep, minor = chapter.partition(" ")[0].partition(".")
 
         return {
             "manga": text.unescape(manga),
@@ -42,12 +43,9 @@ class NgomikChapterExtractor(ChapterExtractor):
         }
 
     @staticmethod
-    def get_images(page):
-        readerarea = text.extract(
-            page, '<div class="page-break', '<div class="select-view')[0]
+    def images(page):
+        readerarea = text.extract(page, 'id="readerarea"', 'class="chnav"')[0]
         return [
-            (url, None)
-            for url in text.extract_iter(
-                readerarea, ' src="', '"'
-            )
+            (text.unescape(url), None)
+            for url in re.findall(r"\ssrc=[\"']?([^\"' >]+)", readerarea)
         ]

@@ -1,83 +1,37 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2014-2018 Mike Fährmann
+# Copyright 2014-2020 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
 # published by the Free Software Foundation.
 
-"""Extract images from https://gelbooru.com/"""
+"""Extractors for https://gelbooru.com/"""
 
 from . import booru
-from .common import Message
-from .. import text, util
+from .. import text, exception
 
 
-class GelbooruExtractor(booru.XmlParserMixin,
-                        booru.GelbooruPageMixin,
-                        booru.BooruExtractor):
+class GelbooruBase():
     """Base class for gelbooru extractors"""
     category = "gelbooru"
-    api_url = "https://gelbooru.com/index.php"
-    post_url = "https://gelbooru.com/index.php?page=post&s=view&id={}"
-    pool_url = "https://gelbooru.com/index.php?page=pool&s=show&id={}"
+    root = "https://gelbooru.com"
 
-    def __init__(self, match):
-        super().__init__(match)
-
-        self.use_api = self.config("api", True)
-        if self.use_api:
-            self.params.update({"page": "dapi", "s": "post", "q": "index"})
-        else:
-            self.items = self.items_noapi
-
-    def items_noapi(self):
-        data = self.get_metadata()
-
-        yield Message.Version, 1
-        yield Message.Directory, data
-
-        for post in self.get_posts():
-            post = self.get_post_data(post)
-            url = post["file_url"]
-            post.update(data)
-            yield Message.Url, url, text.nameext_from_url(url, post)
-
-    def get_posts(self):
-        """Return an iterable containing all relevant post objects"""
-
-    def get_post_data(self, post_id):
-        """Extract metadata of a single post"""
-        page = self.request(self.post_url.format(post_id)).text
-        data = text.extract_all(page, (
-            (None        , '<meta name="keywords"', ''),
-            ("tags"      , ' imageboard, ', '"'),
-            ("id"        , '<li>Id: ', '<'),
-            ("created_at", '<li>Posted: ', '<'),
-            ("width"     , '<li>Size: ', 'x'),
-            ("height"    , '', '<'),
-            ("source"    , '<li>Source: <a href="', '"'),
-            ("rating"    , '<li>Rating: ', '<'),
-            (None        , '<li>Score: ', ''),
-            ("score"     , '>', '<'),
-            ("file_url"  , '<li><a href="http', '"'),
-            ("change"    , ' id="lupdated" value="', '"'),
-        ))[0]
-        data["file_url"] = "http" + data["file_url"].replace("m//", "m/", 1)
-        data["md5"] = data["file_url"].rpartition("/")[2].partition(".")[0]
-        data["rating"] = (data["rating"] or "?")[0].lower()
-        data["tags"] = " ".join(
-            [tag.replace(" ", "_") for tag in data["tags"].split(", ")])
-        if self.extags:
-            self.extended_tags(data, page)
-        return data
+    @staticmethod
+    def _file_url(post):
+        url = post["file_url"]
+        if url.startswith(("https://mp4.gelbooru.com/", "https://video-cdn")):
+            md5 = post["md5"]
+            url = "https://img2.gelbooru.com/images/{}/{}/{}.webm".format(
+                md5[0:2], md5[2:4], md5)
+        return url
 
 
-class GelbooruTagExtractor(booru.TagMixin, GelbooruExtractor):
+class GelbooruTagExtractor(GelbooruBase, booru.BooruTagExtractor):
     """Extractor for images from gelbooru.com based on search-tags"""
-    pattern = [r"(?:https?://)?(?:www\.)?gelbooru\.com/(?:index\.php)?"
-               r"\?page=post&s=list&tags=(?P<tags>[^&#]+)"]
-    test = [
+    pattern = (r"(?:https?://)?(?:www\.)?gelbooru\.com/(?:index\.php)?"
+               r"\?page=post&s=list&tags=(?P<tags>[^&#]+)")
+    test = (
         ("https://gelbooru.com/index.php?page=post&s=list&tags=bonocho", {
             "count": 5,
         }),
@@ -85,46 +39,44 @@ class GelbooruTagExtractor(booru.TagMixin, GelbooruExtractor):
             "options": (("api", False),),
             "count": 5,
         }),
-    ]
-
-    def __init__(self, match):
-        super().__init__(match)
-        if not self.use_api:
-            self.per_page = 42
-
-    def get_posts(self):
-        url = "https://gelbooru.com/index.php?page=post&s=list"
-        params = {"tags": self.tags, "pid": self.page_start * self.per_page}
-
-        while True:
-            page = self.request(url, params=params).text
-            ids = list(text.extract_iter(page, '<a id="p', '"'))
-            yield from ids
-            if len(ids) < self.per_page:
-                return
-            params["pid"] += self.per_page
+    )
 
 
-class GelbooruPoolExtractor(booru.GelbooruPoolMixin, GelbooruExtractor):
+class GelbooruPoolExtractor(GelbooruBase, booru.BooruPoolExtractor):
     """Extractor for image-pools from gelbooru.com"""
-    pattern = [r"(?:https?://)?(?:www\.)?gelbooru\.com/(?:index\.php)?"
-               r"\?page=pool&s=show&id=(?P<pool>\d+)"]
-    test = [("https://gelbooru.com/index.php?page=pool&s=show&id=761", {
-        "count": 6,
-    })]
+    pattern = (r"(?:https?://)?(?:www\.)?gelbooru\.com/(?:index\.php)?"
+               r"\?page=pool&s=show&id=(?P<pool>\d+)")
+    test = (
+        ("https://gelbooru.com/index.php?page=pool&s=show&id=761", {
+            "count": 6,
+        }),
+        ("https://gelbooru.com/index.php?page=pool&s=show&id=761", {
+            "options": (("api", False),),
+            "count": 6,
+        }),
+    )
 
-    def get_posts(self):
-        return util.advance(self.posts, self.page_start)
+    def metadata(self):
+        url = "{}/index.php?page=pool&s=show&id={}".format(
+            self.root, self.pool_id)
+        page = self.request(url).text
+
+        name, pos = text.extract(page, "<h3>Now Viewing: ", "</h3>")
+        if not name:
+            raise exception.NotFoundError("pool")
+        self.post_ids = text.extract_iter(page, 'class="" id="p', '"', pos)
+
+        return {
+            "pool": text.parse_int(self.pool_id),
+            "pool_name": text.unescape(name),
+        }
 
 
-class GelbooruPostExtractor(booru.PostMixin, GelbooruExtractor):
+class GelbooruPostExtractor(GelbooruBase, booru.BooruPostExtractor):
     """Extractor for single images from gelbooru.com"""
-    pattern = [r"(?:https?://)?(?:www\.)?gelbooru\.com/(?:index\.php)?"
-               r"\?page=post&s=view&id=(?P<post>\d+)"]
-    test = [("https://gelbooru.com/index.php?page=post&s=view&id=313638", {
+    pattern = (r"(?:https?://)?(?:www\.)?gelbooru\.com/(?:index\.php)?"
+               r"\?page=post&s=view&id=(?P<post>\d+)")
+    test = ("https://gelbooru.com/index.php?page=post&s=view&id=313638", {
         "content": "5e255713cbf0a8e0801dc423563c34d896bb9229",
         "count": 1,
-    })]
-
-    def get_posts(self):
-        return (self.post,)
+    })

@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Copyright 2015-2018 Mike Fährmann
+# Copyright 2015-2020 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
 # published by the Free Software Foundation.
 
+import os
+import sys
 import unittest
 
-from gallery_dl import text
+import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from gallery_dl import text  # noqa E402
 
 
 INVALID = ((), [], {}, None, 1, 2.3)
@@ -71,8 +76,9 @@ class TestText(unittest.TestCase):
         # standard usage
         self.assertEqual(f(""), empty)
         self.assertEqual(f("Hello World."), ["Hello World."])
-        self.assertEqual(f(" Hello  World.  "), [" Hello  World.  "])
+        self.assertEqual(f(" Hello  World.  "), ["Hello  World."])
         self.assertEqual(f("Hello<br/>World."), result)
+        self.assertEqual(f(" Hello <br/> World.  "), result)
         self.assertEqual(
             f("<div><b class='a'>Hello</b><i>World.</i></div>"), result)
 
@@ -87,6 +93,33 @@ class TestText(unittest.TestCase):
         # invalid arguments
         for value in INVALID:
             self.assertEqual(f(value), empty)
+
+    def test_ensure_http_scheme(self, f=text.ensure_http_scheme):
+        result = "https://example.org/filename.ext"
+
+        # standard usage
+        self.assertEqual(f(""), "")
+        self.assertEqual(f("example.org/filename.ext"), result)
+        self.assertEqual(f("/example.org/filename.ext"), result)
+        self.assertEqual(f("//example.org/filename.ext"), result)
+        self.assertEqual(f("://example.org/filename.ext"), result)
+
+        # no change
+        self.assertEqual(f(result), result)
+        self.assertEqual(
+            f("http://example.org/filename.ext"),
+            "http://example.org/filename.ext",
+        )
+
+        # ...
+        self.assertEqual(
+            f("htp://example.org/filename.ext"),
+            "https://htp://example.org/filename.ext",
+        )
+
+        # invalid arguments
+        for value in INVALID_ALT:
+            self.assertEqual(f(value), value)
 
     def test_filename_from_url(self, f=text.filename_from_url):
         result = "filename.ext"
@@ -104,10 +137,25 @@ class TestText(unittest.TestCase):
         for value in INVALID:
             self.assertEqual(f(value), "")
 
+    def test_ext_from_url(self, f=text.ext_from_url):
+        result = "ext"
+
+        # standard usage
+        self.assertEqual(f(""), "")
+        self.assertEqual(f("filename.ext"), result)
+        self.assertEqual(f("/filename.ext"), result)
+        self.assertEqual(f("example.org/filename.ext"), result)
+        self.assertEqual(f("http://example.org/v2/filename.ext"), result)
+        self.assertEqual(
+            f("http://example.org/v2/filename.ext?param=value#frag"), result)
+
+        # invalid arguments
+        for value in INVALID:
+            self.assertEqual(f(value), "")
+
     def test_nameext_from_url(self, f=text.nameext_from_url):
-        empty = {"filename": "", "name": "", "extension": ""}
-        result = {"filename": "filename.ext",
-                  "name": "filename", "extension": "ext"}
+        empty = {"filename": "", "extension": ""}
+        result = {"filename": "filename", "extension": "ext"}
 
         # standard usage
         self.assertEqual(f(""), empty)
@@ -122,29 +170,9 @@ class TestText(unittest.TestCase):
         for value in INVALID:
             self.assertEqual(f(value), empty)
 
-    def test_clean_path_windows(self, f=text.clean_path_windows):
-        self.assertEqual(f(""), "")
-        self.assertEqual(f("foo"), "foo")
-        self.assertEqual(f("foo/bar"), "foo_bar")
-        self.assertEqual(f("foo<>:\"\\/|?*bar"), "foo_________bar")
-
-        # invalid arguments
-        for value in INVALID:
-            self.assertEqual(f(value), "")
-
-    def test_clean_path_posix(self, f=text.clean_path_posix):
-        self.assertEqual(f(""), "")
-        self.assertEqual(f("foo"), "foo")
-        self.assertEqual(f("foo/bar"), "foo_bar")
-        self.assertEqual(f("foo<>:\"\\/|?*bar"), "foo<>:\"\\_|?*bar")
-
-        # invalid arguments
-        for value in INVALID:
-            self.assertEqual(f(value), "")
-
     def test_extract(self, f=text.extract):
         txt = "<a><b>"
-        self.assertEqual(f(txt, "<", ">"), ("a", 3))
+        self.assertEqual(f(txt, "<", ">"), ("a" , 3))
         self.assertEqual(f(txt, "X", ">"), (None, 0))
         self.assertEqual(f(txt, "<", "X"), (None, 0))
 
@@ -156,9 +184,27 @@ class TestText(unittest.TestCase):
 
         # invalid arguments
         for value in INVALID:
-            self.assertEqual(f(value   , "<"  , ">")  , (None, 0))
-            self.assertEqual(f(txt, value, ">")  , (None, 0))
-            self.assertEqual(f(txt, "<"  , value), (None, 0))
+            self.assertEqual(f(value, "<"  , ">")  , (None, 0))
+            self.assertEqual(f(txt  , value, ">")  , (None, 0))
+            self.assertEqual(f(txt  , "<"  , value), (None, 0))
+
+    def test_rextract(self, f=text.rextract):
+        txt = "<a><b>"
+        self.assertEqual(f(txt, "<", ">"), ("b" , 3))
+        self.assertEqual(f(txt, "X", ">"), (None, -1))
+        self.assertEqual(f(txt, "<", "X"), (None, -1))
+
+        # 'pos' argument
+        for i in range(10, 3, -1):
+            self.assertEqual(f(txt, "<", ">", i), ("b", 3))
+        for i in range(3, 0, -1):
+            self.assertEqual(f(txt, "<", ">", i), ("a", 0))
+
+        # invalid arguments
+        for value in INVALID:
+            self.assertEqual(f(value, "<"  , ">")  , (None, -1))
+            self.assertEqual(f(txt  , value, ">")  , (None, -1))
+            self.assertEqual(f(txt  , "<"  , value), (None, -1))
 
     def test_extract_all(self, f=text.extract_all):
         txt = "[c][b][a]: xyz! [d][e"
@@ -219,6 +265,35 @@ class TestText(unittest.TestCase):
         self.assertEqual(
             g(txt, "[", "]", 6), ["a", "d"])
 
+    def test_extract_from(self, f=text.extract_from):
+        txt = "[c][b][a]: xyz! [d][e"
+
+        e = f(txt)
+        self.assertEqual(e("[", "]"), "c")
+        self.assertEqual(e("[", "]"), "b")
+        self.assertEqual(e("[", "]"), "a")
+        self.assertEqual(e("[", "]"), "d")
+        self.assertEqual(e("[", "]"), "")
+        self.assertEqual(e("[", "]"), "")
+
+        e = f(txt, pos=6, default="END")
+        self.assertEqual(e("[", "]"), "a")
+        self.assertEqual(e("[", "]"), "d")
+        self.assertEqual(e("[", "]"), "END")
+        self.assertEqual(e("[", "]"), "END")
+
+    def test_parse_unicode_escapes(self, f=text.parse_unicode_escapes):
+        self.assertEqual(f(""), "")
+        self.assertEqual(f("foobar"), "foobar")
+        self.assertEqual(f("foo’bar"), "foo’bar")
+        self.assertEqual(f("foo\\u2019bar"), "foo’bar")
+        self.assertEqual(f("foo\\u201bar"), "foo‛ar")
+        self.assertEqual(f("foo\\u201zar"), "foo\\u201zar")
+        self.assertEqual(
+            f("\\u2018foo\\u2019\\u2020bar\\u00ff"),
+            "‘foo’†barÿ",
+        )
+
     def test_parse_bytes(self, f=text.parse_bytes):
         self.assertEqual(f("0"), 0)
         self.assertEqual(f("50"), 50)
@@ -260,6 +335,27 @@ class TestText(unittest.TestCase):
             self.assertEqual(f(value, default), default)
         self.assertEqual(f("zzz", default), default)
 
+    def test_parse_float(self, f=text.parse_float):
+        self.assertEqual(f(0), 0.0)
+        self.assertEqual(f("0"), 0.0)
+        self.assertEqual(f(123), 123.0)
+        self.assertEqual(f("123"), 123.0)
+        self.assertEqual(f(123.456), 123.456)
+        self.assertEqual(f("123.456"), 123.456)
+
+        # invalid arguments
+        for value in INVALID_ALT:
+            self.assertEqual(f(value), 0.0)
+        self.assertEqual(f("zzz"), 0.0)
+        self.assertEqual(f([1, 2, 3]), 0.0)
+        self.assertEqual(f({1: 2, 3: 4}), 0.0)
+
+        # 'default' argument
+        default = "default"
+        for value in INVALID_ALT:
+            self.assertEqual(f(value, default), default)
+        self.assertEqual(f("zzz", default), default)
+
     def test_parse_query(self, f=text.parse_query):
         # standard usage
         self.assertEqual(f(""), {})
@@ -281,6 +377,51 @@ class TestText(unittest.TestCase):
         # invalid arguments
         for value in INVALID:
             self.assertEqual(f(value), {})
+
+    def test_parse_timestamp(self, f=text.parse_timestamp):
+        null = datetime.datetime.utcfromtimestamp(0)
+        value = datetime.datetime.utcfromtimestamp(1555816235)
+
+        self.assertEqual(f(0)           , null)
+        self.assertEqual(f("0")         , null)
+        self.assertEqual(f(1555816235)  , value)
+        self.assertEqual(f("1555816235"), value)
+
+        for value in INVALID_ALT:
+            self.assertEqual(f(value), None)
+            self.assertEqual(f(value, "foo"), "foo")
+
+    def test_parse_datetime(self, f=text.parse_datetime):
+        null = datetime.datetime.utcfromtimestamp(0)
+
+        self.assertEqual(f("1970-01-01T00:00:00+00:00"), null)
+        self.assertEqual(f("1970-01-01T00:00:00+0000") , null)
+        self.assertEqual(f("1970.01.01", "%Y.%m.%d")   , null)
+
+        self.assertEqual(
+            f("2019-05-07T21:25:02+09:00"),
+            datetime.datetime(2019, 5, 7, 12, 25, 2),
+        )
+        self.assertEqual(
+            f("2019-05-07T21:25:02+0900"),
+            datetime.datetime(2019, 5, 7, 12, 25, 2),
+        )
+        self.assertEqual(
+            f("2019-05-07T21:25:02.753+0900", "%Y-%m-%dT%H:%M:%S.%f%z"),
+            datetime.datetime(2019, 5, 7, 12, 25, 2),
+        )
+        self.assertEqual(
+            f("2019-05-07T21:25:02", "%Y-%m-%dT%H:%M:%S", utcoffset=9),
+            datetime.datetime(2019, 5, 7, 12, 25, 2),
+        )
+        self.assertEqual(
+            f("2019-05-07 21:25:02"),
+            "2019-05-07 21:25:02",
+        )
+
+        for value in INVALID:
+            self.assertEqual(f(value), None)
+        self.assertEqual(f("1970.01.01"), "1970.01.01")
 
 
 if __name__ == '__main__':

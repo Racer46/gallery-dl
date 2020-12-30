@@ -1,32 +1,36 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2017-2018 Mike Fährmann
+# Copyright 2017-2020 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
 # published by the Free Software Foundation.
 
-"""Utility classes to setup OAuth and link a users account to gallery-dl"""
+"""Utility classes to setup OAuth and link accounts to gallery-dl"""
 
 from .common import Extractor, Message
 from . import deviantart, flickr, reddit, smugmug, tumblr
-from .. import text, oauth, config
-import os
+from .. import text, oauth, util, config, exception
+from ..cache import cache
 import urllib.parse
+
+REDIRECT_URI_LOCALHOST = "http://localhost:6414/"
+REDIRECT_URI_HTTPS = "https://mikf.github.io/gallery-dl/oauth-redirect.html"
 
 
 class OAuthBase(Extractor):
     """Base class for OAuth Helpers"""
     category = "oauth"
-    redirect_uri = "http://localhost:6414/"
+    redirect_uri = REDIRECT_URI_LOCALHOST
 
     def __init__(self, match):
-        Extractor.__init__(self)
+        Extractor.__init__(self, match)
         self.client = None
+        self.cache = config.get(("extractor", self.category), "cache", True)
 
     def oauth_config(self, key, default=None):
         return config.interpolate(
-            ("extractor", self.subcategory, key), default)
+            ("extractor", self.subcategory), key, default)
 
     def recv(self):
         """Open local HTTP server and recv callback parameters"""
@@ -34,11 +38,11 @@ class OAuthBase(Extractor):
         print("Waiting for response. (Cancel with Ctrl+c)")
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind(("localhost", 6414))
+        server.bind(("localhost", self.config("port", 6414)))
         server.listen(1)
 
         # workaround for ctrl+c not working during server.accept on Windows
-        if os.name == "nt":
+        if util.WINDOWS:
             server.settimeout(1.0)
         while True:
             try:
@@ -82,19 +86,27 @@ class OAuthBase(Extractor):
         data = self.open(authorize_url, params)
 
         # exchange the request token for an access token
-        # self.session.token = data["oauth_token"]
         data = self.session.get(access_token_url, params=data).text
-
         data = text.parse_query(data)
-        self.send(OAUTH1_MSG_TEMPLATE.format(
-            category=self.subcategory,
-            token=data["oauth_token"],
-            token_secret=data["oauth_token_secret"],
+        token = data["oauth_token"]
+        token_secret = data["oauth_token_secret"]
+
+        # write to cache
+        if self.cache:
+            key = (self.subcategory, self.session.auth.consumer_key)
+            oauth._token_cache.update(key, (token, token_secret))
+            self.log.info("Writing tokens to cache")
+
+        # display tokens
+        self.send(self._generate_message(
+            ("access-token", "access-token-secret"),
+            (token, token_secret),
         ))
 
     def _oauth2_authorization_code_grant(
             self, client_id, client_secret, auth_url, token_url,
-            scope="read", key="refresh_token", auth=True):
+            scope="read", key="refresh_token", auth=True,
+            message_template=None, cache=None):
         """Perform an OAuth2 authorization code grant"""
 
         state = "gallery-dl_{}_{}".format(
@@ -145,38 +157,84 @@ class OAuthBase(Extractor):
             self.send(data["error"])
             return
 
+        # write to cache
+        if self.cache and cache:
+            cache.update("#" + str(client_id), data[key])
+            self.log.info("Writing 'refresh-token' to cache")
+
         # display token
-        part = key.partition("_")[0]
-        self.send(OAUTH2_MSG_TEMPLATE.format(
-            category=self.subcategory,
-            key=part,
-            Key=part.capitalize(),
-            token=data[key],
-        ))
+        if message_template:
+            msg = message_template.format(
+                category=self.subcategory,
+                key=key.partition("_")[0],
+                token=data[key],
+                instance=getattr(self, "instance", ""),
+                client_id=client_id,
+                client_secret=client_secret,
+            )
+        else:
+            msg = self._generate_message(
+                ("refresh-token",),
+                (data[key],),
+            )
+        self.send(msg)
+
+    def _generate_message(self, names, values):
+        _vh, _va, _is, _it = (
+            ("This value has", "this value", "is", "it")
+            if len(names) == 1 else
+            ("These values have", "these values", "are", "them")
+        )
+
+        msg = "\nYour {} {}\n\n{}\n\n".format(
+            " and ".join("'" + n + "'" for n in names),
+            _is,
+            "\n".join(values),
+        )
+
+        opt = self.oauth_config(names[0])
+        if self.cache and (opt is None or opt == "cache"):
+            msg += _vh + " been cached and will automatically be used."
+        else:
+            msg += "Put " + _va + " into your configuration file as \n"
+            msg += " and\n".join(
+                "'extractor." + self.subcategory + "." + n + "'"
+                for n in names
+            )
+            if self.cache:
+                msg += (
+                    "\nor set\n'extractor.{}.{}' to \"cache\""
+                    .format(self.subcategory, names[0])
+                )
+            msg += "\nto use {}.".format(_it)
+
+        return msg
 
 
 class OAuthDeviantart(OAuthBase):
     subcategory = "deviantart"
-    pattern = ["oauth:deviantart$"]
-    redirect_uri = "https://mikf.github.io/gallery-dl/oauth-redirect.html"
+    pattern = "oauth:deviantart$"
+    redirect_uri = REDIRECT_URI_HTTPS
 
     def items(self):
         yield Message.Version, 1
 
         self._oauth2_authorization_code_grant(
             self.oauth_config(
-                "client-id", deviantart.DeviantartAPI.CLIENT_ID),
+                "client-id", deviantart.DeviantartOAuthAPI.CLIENT_ID),
             self.oauth_config(
-                "client-secret", deviantart.DeviantartAPI.CLIENT_SECRET),
+                "client-secret", deviantart.DeviantartOAuthAPI.CLIENT_SECRET),
             "https://www.deviantart.com/oauth2/authorize",
             "https://www.deviantart.com/oauth2/token",
             scope="browse",
+            cache=deviantart._refresh_token_cache,
         )
 
 
 class OAuthFlickr(OAuthBase):
     subcategory = "flickr"
-    pattern = ["oauth:flickr$"]
+    pattern = "oauth:flickr$"
+    redirect_uri = REDIRECT_URI_HTTPS
 
     def __init__(self, match):
         OAuthBase.__init__(self, match)
@@ -197,7 +255,7 @@ class OAuthFlickr(OAuthBase):
 
 class OAuthReddit(OAuthBase):
     subcategory = "reddit"
-    pattern = ["oauth:reddit$"]
+    pattern = "oauth:reddit$"
 
     def items(self):
         yield Message.Version, 1
@@ -208,13 +266,14 @@ class OAuthReddit(OAuthBase):
             "",
             "https://www.reddit.com/api/v1/authorize",
             "https://www.reddit.com/api/v1/access_token",
-            scope="read",
+            scope="read history",
+            cache=reddit._refresh_token_cache,
         )
 
 
 class OAuthSmugmug(OAuthBase):
     subcategory = "smugmug"
-    pattern = ["oauth:smugmug$"]
+    pattern = "oauth:smugmug$"
 
     def __init__(self, match):
         OAuthBase.__init__(self, match)
@@ -235,7 +294,7 @@ class OAuthSmugmug(OAuthBase):
 
 class OAuthTumblr(OAuthBase):
     subcategory = "tumblr"
-    pattern = ["oauth:tumblr$"]
+    pattern = "oauth:tumblr$"
 
     def __init__(self, match):
         OAuthBase.__init__(self, match)
@@ -254,41 +313,75 @@ class OAuthTumblr(OAuthBase):
         )
 
 
-OAUTH1_MSG_TEMPLATE = """
-Your Access Token and Access Token Secret are
+class OAuthMastodon(OAuthBase):
+    subcategory = "mastodon"
+    pattern = "oauth:mastodon:(?:https?://)?([^/?#]+)"
 
-{token}
-{token_secret}
+    def __init__(self, match):
+        OAuthBase.__init__(self, match)
+        self.instance = match.group(1)
 
-Put these values into your configuration file as
-'extractor.{category}.access-token' and
-'extractor.{category}.access-token-secret'.
+    def items(self):
+        yield Message.Version, 1
 
-Example:
-{{
-    "extractor": {{
-        "{category}": {{
-            "access-token": "{token}",
-            "access-token-secret": "{token_secret}"
-        }}
-    }}
-}}
-"""
+        application = self.oauth_config(self.instance)
+        if not application:
+            application = self._register(self.instance)
+
+        self._oauth2_authorization_code_grant(
+            application["client-id"],
+            application["client-secret"],
+            "https://{}/oauth/authorize".format(self.instance),
+            "https://{}/oauth/token".format(self.instance),
+            key="access_token",
+            message_template=MASTODON_MSG_TEMPLATE,
+        )
+
+    @cache(maxage=10*365*24*3600, keyarg=1)
+    def _register(self, instance):
+        self.log.info("Registering application for '%s'", instance)
+
+        url = "https://{}/api/v1/apps".format(instance)
+        data = {
+            "client_name": "gdl:" + oauth.nonce(8),
+            "redirect_uris": self.redirect_uri,
+            "scopes": "read",
+        }
+        data = self.session.post(url, data=data).json()
+
+        if "client_id" not in data or "client_secret" not in data:
+            raise exception.StopExtraction(
+                "Failed to register new application: '%s'", data)
+
+        data["client-id"] = data.pop("client_id")
+        data["client-secret"] = data.pop("client_secret")
+
+        self.log.info("client-id:\n%s", data["client-id"])
+        self.log.info("client-secret:\n%s", data["client-secret"])
+
+        return data
 
 
-OAUTH2_MSG_TEMPLATE = """
-Your {Key} Token is
+MASTODON_MSG_TEMPLATE = """
+Your 'access-token' is
 
 {token}
 
 Put this value into your configuration file as
-'extractor.{category}.{key}-token'.
+'extractor.mastodon.{instance}.{key}-token'.
+
+You can also add your 'client-id' and 'client-secret' values
+if you want to register another account in the future.
 
 Example:
 {{
     "extractor": {{
-        "{category}": {{
-            "{key}-token": "{token}"
+        "mastodon": {{
+            "{instance}": {{
+                "{key}-token": "{token}",
+                "client-id": "{client_id}",
+                "client-secret": "{client_secret}"
+            }}
         }}
     }}
 }}

@@ -1,36 +1,114 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# Copyright 2018 Mike Fährmann
+# Copyright 2018-2020 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
 # published by the Free Software Foundation.
 
+import os
+import sys
+import unittest
+from unittest.mock import Mock, MagicMock, patch
+
 import re
 import base64
+import logging
 import os.path
 import tempfile
-import unittest
 import threading
 import http.server
 
-import gallery_dl.downloader as downloader
-import gallery_dl.extractor as extractor
-import gallery_dl.config as config
-from gallery_dl.downloader.common import DownloaderBase
-from gallery_dl.output import NullOutput
-from gallery_dl.util import PathFormat
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from gallery_dl import downloader, extractor, output, config, util  # noqa E402
+
+
+class MockDownloaderModule(Mock):
+    __downloader__ = "mock"
+
+
+class FakeJob():
+
+    def __init__(self):
+        self.extractor = extractor.find("test:")
+        self.pathfmt = util.PathFormat(self.extractor)
+        self.out = output.NullOutput()
+        self.get_logger = logging.getLogger
+
+
+class TestDownloaderModule(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        # allow import of ytdl downloader module without youtube_dl installed
+        sys.modules["youtube_dl"] = MagicMock()
+
+    @classmethod
+    def tearDownClass(cls):
+        del sys.modules["youtube_dl"]
+
+    def tearDown(self):
+        downloader._cache.clear()
+
+    def test_find(self):
+        cls = downloader.find("http")
+        self.assertEqual(cls.__name__, "HttpDownloader")
+        self.assertEqual(cls.scheme  , "http")
+
+        cls = downloader.find("https")
+        self.assertEqual(cls.__name__, "HttpDownloader")
+        self.assertEqual(cls.scheme  , "http")
+
+        cls = downloader.find("text")
+        self.assertEqual(cls.__name__, "TextDownloader")
+        self.assertEqual(cls.scheme  , "text")
+
+        cls = downloader.find("ytdl")
+        self.assertEqual(cls.__name__, "YoutubeDLDownloader")
+        self.assertEqual(cls.scheme  , "ytdl")
+
+        self.assertEqual(downloader.find("ftp"), None)
+        self.assertEqual(downloader.find("foo"), None)
+        self.assertEqual(downloader.find(1234) , None)
+        self.assertEqual(downloader.find(None) , None)
+
+    @patch("importlib.import_module")
+    def test_cache(self, import_module):
+        import_module.return_value = MockDownloaderModule()
+        downloader.find("http")
+        downloader.find("text")
+        downloader.find("ytdl")
+        self.assertEqual(import_module.call_count, 3)
+        downloader.find("http")
+        downloader.find("text")
+        downloader.find("ytdl")
+        self.assertEqual(import_module.call_count, 3)
+
+    @patch("importlib.import_module")
+    def test_cache_http(self, import_module):
+        import_module.return_value = MockDownloaderModule()
+        downloader.find("http")
+        downloader.find("https")
+        self.assertEqual(import_module.call_count, 1)
+
+    @patch("importlib.import_module")
+    def test_cache_https(self, import_module):
+        import_module.return_value = MockDownloaderModule()
+        downloader.find("https")
+        downloader.find("http")
+        self.assertEqual(import_module.call_count, 1)
 
 
 class TestDownloaderBase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.extractor = extractor.find("test:")
         cls.dir = tempfile.TemporaryDirectory()
         cls.fnum = 0
-        config.set(("base-directory",), cls.dir.name)
+        config.set((), "base-directory", cls.dir.name)
+        cls.job = FakeJob()
 
     @classmethod
     def tearDownClass(cls):
@@ -43,14 +121,15 @@ class TestDownloaderBase(unittest.TestCase):
         cls.fnum += 1
 
         kwdict = {
-            "category": "test",
+            "category"   : "test",
             "subcategory": "test",
-            "name": name,
-            "extension": extension,
+            "filename"   : name,
+            "extension"  : extension,
         }
-        pathfmt = PathFormat(cls.extractor)
+
+        pathfmt = cls.job.pathfmt
         pathfmt.set_directory(kwdict)
-        pathfmt.set_keywords(kwdict)
+        pathfmt.set_filename(kwdict)
 
         if content:
             mode = "w" + ("b" if isinstance(content, bytes) else "")
@@ -75,7 +154,7 @@ class TestDownloaderBase(unittest.TestCase):
 
         # test filename extension
         self.assertEqual(
-            pathfmt.keywords["extension"],
+            pathfmt.extension,
             expected_extension,
         )
         self.assertEqual(
@@ -89,7 +168,7 @@ class TestHTTPDownloader(TestDownloaderBase):
     @classmethod
     def setUpClass(cls):
         TestDownloaderBase.setUpClass()
-        cls.downloader = downloader.find("http")(cls.extractor, NullOutput())
+        cls.downloader = downloader.find("http")(cls.job)
 
         port = 8088
         cls.address = "http://127.0.0.1:{}".format(port)
@@ -99,6 +178,9 @@ class TestHTTPDownloader(TestDownloaderBase):
 
         server = http.server.HTTPServer(("", port), HttpRequestHandler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.downloader.minsize = self.downloader.maxsize = None
 
     def test_http_download(self):
         self._run_test(self._jpg, None, DATA_JPG, "jpg", "jpg")
@@ -120,13 +202,27 @@ class TestHTTPDownloader(TestDownloaderBase):
         self._run_test(self._png, None, DATA_PNG, "gif", "png")
         self._run_test(self._gif, None, DATA_GIF, "jpg", "gif")
 
+    def test_http_filesize_min(self):
+        pathfmt = self._prepare_destination(None, extension=None)
+        self.downloader.minsize = 100
+        with self.assertLogs(self.downloader.log, "WARNING"):
+            success = self.downloader.download(self._gif, pathfmt)
+        self.assertFalse(success)
+
+    def test_http_filesize_max(self):
+        pathfmt = self._prepare_destination(None, extension=None)
+        self.downloader.maxsize = 100
+        with self.assertLogs(self.downloader.log, "WARNING"):
+            success = self.downloader.download(self._jpg, pathfmt)
+        self.assertFalse(success)
+
 
 class TestTextDownloader(TestDownloaderBase):
 
     @classmethod
     def setUpClass(cls):
         TestDownloaderBase.setUpClass()
-        cls.downloader = downloader.find("text")(cls.extractor, NullOutput())
+        cls.downloader = downloader.find("text")(cls.job)
 
     def test_text_download(self):
         self._run_test("text:foobar", None, "foobar", "txt", "txt")
@@ -134,34 +230,8 @@ class TestTextDownloader(TestDownloaderBase):
     def test_text_offset(self):
         self._run_test("text:foobar", "foo", "foobar", "txt", "txt")
 
-    def test_text_extension(self):
-        self._run_test("text:foobar", None, "foobar", None, "txt")
-
     def test_text_empty(self):
         self._run_test("text:", None, "", "txt", "txt")
-
-
-class FakeDownloader(DownloaderBase):
-    scheme = "fake"
-
-    def __init__(self, extractor, output):
-        DownloaderBase.__init__(self, extractor, output)
-
-    def connect(self, url, offset):
-        pass
-
-    def receive(self, file):
-        pass
-
-    def reset(self):
-        pass
-
-    def get_extension(self):
-        pass
-
-    @staticmethod
-    def _check_extension(file, pathfmt):
-        pass
 
 
 class HttpRequestHandler(http.server.BaseHTTPRequestHandler):

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2018 Mike Fährmann
+# Copyright 2018-2020 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -9,23 +9,23 @@
 """Store files in ZIP archives"""
 
 from .common import PostProcessor
+from .. import util
 import zipfile
-import os
 
 
 class ZipPP(PostProcessor):
 
     COMPRESSION_ALGORITHMS = {
         "store": zipfile.ZIP_STORED,
-        "zip": zipfile.ZIP_DEFLATED,
+        "zip"  : zipfile.ZIP_DEFLATED,
         "bzip2": zipfile.ZIP_BZIP2,
-        "lzma": zipfile.ZIP_LZMA,
+        "lzma" : zipfile.ZIP_LZMA,
     }
 
-    def __init__(self, pathfmt, options):
-        PostProcessor.__init__(self)
+    def __init__(self, job, options):
+        PostProcessor.__init__(self, job)
         self.delete = not options.get("keep-files", False)
-        self.ext = "." + options.get("extension", "zip")
+        ext = "." + options.get("extension", "zip")
         algorithm = options.get("compression", "store")
         if algorithm not in self.COMPRESSION_ALGORITHMS:
             self.log.warning(
@@ -33,27 +33,41 @@ class ZipPP(PostProcessor):
                 algorithm)
             algorithm = "store"
 
-        self.path = pathfmt.realdirectory
-        self.zfile = zipfile.ZipFile(
-            self.path + self.ext, "a",
-            self.COMPRESSION_ALGORITHMS[algorithm], True)
+        self.zfile = None
+        self.path = job.pathfmt.realdirectory
+        self.args = (self.path[:-1] + ext, "a",
+                     self.COMPRESSION_ALGORITHMS[algorithm], True)
 
-    def run(self, pathfmt):
+        job.hooks["file"].append(
+            self.write_safe if options.get("mode") == "safe" else self.write)
+        job.hooks["finalize"].append(self.finalize)
+
+    def write(self, pathfmt, zfile=None):
         # 'NameToInfo' is not officially documented, but it's available
         # for all supported Python versions and using it directly is a lot
-        # better than calling getinfo()
-        if pathfmt.filename not in self.zfile.NameToInfo:
-            self.zfile.write(pathfmt.temppath, pathfmt.filename)
+        # faster than calling getinfo()
+        if zfile is None:
+            if self.zfile is None:
+                self.zfile = zipfile.ZipFile(*self.args)
+            zfile = self.zfile
+        if pathfmt.filename not in zfile.NameToInfo:
+            zfile.write(pathfmt.temppath, pathfmt.filename)
             pathfmt.delete = self.delete
 
-    def finalize(self):
-        self.zfile.close()
+    def write_safe(self, pathfmt):
+        with zipfile.ZipFile(*self.args) as zfile:
+            self._write(pathfmt, zfile)
+
+    def finalize(self, pathfmt, status):
+        if self.zfile:
+            self.zfile.close()
 
         if self.delete:
-            try:
-                os.rmdir(self.path)
-            except OSError:
-                pass
+            util.remove_directory(self.path)
+
+            if self.zfile and not self.zfile.NameToInfo:
+                # remove empty zip archive
+                util.remove_file(self.zfile.filename)
 
 
 __postprocessor__ = ZipPP

@@ -26,7 +26,8 @@ update() {
     echo Updating version to ${NEWVERSION}
 
     sed -i "s#\"${PYVERSION}\"#\"${NEWVERSION}\"#" "gallery_dl/version.py"
-    sed -i "s#v${OLDVERSION}#v${NEWVERSION}#" "${README}"
+    sed -i "s#v[0-9]\.[0-9]\+\.[0-9]\+#v${NEWVERSION}#" "${README}"
+    make man
 }
 
 update-dev() {
@@ -42,35 +43,35 @@ update-dev() {
     git add "gallery_dl/version.py" "${CHANGELOG}"
 }
 
-build() {
+build-python() {
     cd "${ROOTDIR}"
     echo Building bdist_wheel and sdist
 
     python setup.py bdist_wheel sdist
 }
 
-build-windows() {
+build-linux() {
     cd "${ROOTDIR}"
+    echo Building Linux executable
+
+    make executable
+}
+
+build-windows() {
+    cd "${ROOTDIR}/dist"
     echo Building Windows executable
+
+    # remove old executable
+    rm -f "gallery-dl.exe"
 
     # build windows exe in vm
     ln -fs "${ROOTDIR}" /tmp/
-    vmstart "Windows 7" &
+    vmstart "windows7_x86_sp1" &
     disown
     while [ ! -e "gallery-dl.exe" ] ; do
         sleep 5
     done
-
-    # check exe version
-    OUTPUT="$(wine gallery-dl.exe --version)"
-    if [[ ! "${OUTPUT%?}" == "${NEWVERSION}" ]]; then
-        echo "exe version mismatch: ${OUTPUT} != ${NEWVERSION}"
-        exit 3
-    fi
-    if [ -e "dist/gallery-dl.exe" ]; then
-        mv -f "dist/gallery-dl.exe" "dist/gallery-dl-v${OLDVERSION}.exe"
-    fi
-    mv "gallery-dl.exe" "./dist/"
+    sleep 2
 }
 
 sign() {
@@ -79,15 +80,16 @@ sign() {
 
     gpg --detach-sign --armor gallery_dl-${NEWVERSION}-py3-none-any.whl
     gpg --detach-sign --armor gallery_dl-${NEWVERSION}.tar.gz
-    gpg --detach-sign gallery-dl.exe
+    gpg --detach-sign --yes gallery-dl.exe
+    gpg --detach-sign --yes gallery-dl.bin
 }
 
 changelog() {
     cd "${ROOTDIR}"
     echo Updating "${CHANGELOG}"
 
-    # replace "#NN" with link to actual issue
-    # insert new version and date
+    # - replace "#NN" with link to actual issue
+    # - insert new version and date
     sed -i \
         -e "s*\([( ]\)#\([0-9]\+\)*\1[#\2](https://github.com/mikf/gallery-dl/issues/\2)*g" \
         -e "s*^## [Uu]nreleased*## ${NEWVERSION} - $(date +%Y-%m-%d)*" \
@@ -98,25 +100,24 @@ supportedsites() {
     cd "${ROOTDIR}"
     echo Checking if "${SUPPORTEDSITES}" is up to date
 
-    ./scripts/build_supportedsites.py
+    ./scripts/supportedsites.py
     if ! git diff --quiet "${SUPPORTEDSITES}"; then
         echo "updated ${SUPPORTEDSITES} contains changes"
         exit 4
     fi
 }
 
-git-upload() {
+upload-git() {
     cd "${ROOTDIR}"
     echo Pushing changes to github
 
     git add "gallery_dl/version.py" "${README}" "${CHANGELOG}"
     git commit -S -m "release version ${NEWVERSION}"
     git tag -s -m "version ${NEWVERSION}" "v${NEWVERSION}"
-    git push
-    git push origin "v${NEWVERSION}"
+    git push --atomic origin master "v${NEWVERSION}"
 }
 
-pypi-upload() {
+upload-pypi() {
     cd "${ROOTDIR}/dist"
     echo Uploading to PyPI
 
@@ -149,10 +150,11 @@ prompt
 supportedsites
 cleanup
 update
-build
+changelog
+build-python
+build-linux
 build-windows
 sign
-changelog
-git-upload
-pypi-upload
+upload-git
+upload-pypi
 update-dev

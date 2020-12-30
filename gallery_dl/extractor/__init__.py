@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2015-2018 Mike Fährmann
+# Copyright 2015-2020 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -11,91 +11,119 @@ import importlib
 
 modules = [
     "2chan",
+    "35photo",
     "3dbooru",
     "4chan",
-    "4plebs",
-    "8chan",
-    "archivedmoe",
-    "archiveofsins",
+    "500px",
+    "8kun",
+    "8muses",
+    "adultempire",
     "artstation",
-    "b4k",
+    "aryion",
+    "bcy",
     "behance",
-    "bobx",
+    "blogger",
     "danbooru",
-    "desuarchive",
     "deviantart",
-    "dokireader",
     "dynastyscans",
     "e621",
     "exhentai",
     "fallenangels",
-    "fireden",
     "flickr",
+    "furaffinity",
+    "fuskator",
     "gelbooru",
     "gfycat",
     "hbrowse",
     "hentai2read",
     "hentaicafe",
     "hentaifoundry",
+    "hentaifox",
+    "hentaihand",
     "hentaihere",
+    "hentainexus",
+    "hiperdex",
     "hitomi",
     "idolcomplex",
     "imagebam",
+    "imagechest",
     "imagefap",
+    "imgbb",
     "imgbox",
     "imgth",
     "imgur",
+    "inkbunny",
     "instagram",
-    "jaiminisbox",
-    "joyreactor",
+    "issuu",
+    "kabeuchi",
+    "keenspot",
     "khinsider",
-    "kireicake",
-    "kissmanga",
     "komikcast",
-    "konachan",
+    "lineblog",
+    "livedoor",
     "luscious",
     "mangadex",
     "mangafox",
     "mangahere",
-    "mangapanda",
+    "mangakakalot",
     "mangapark",
     "mangareader",
     "mangastream",
+    "mangoxo",
+    "myhentaigallery",
     "myportfolio",
+    "naver",
     "newgrounds",
     "ngomik",
     "nhentai",
     "nijie",
-    "nyafuu",
+    "nozomi",
+    "nsfwalbum",
     "paheal",
-    "pawoo",
+    "patreon",
+    "photobucket",
     "piczel",
     "pinterest",
     "pixiv",
-    "pornreactor",
-    "powermanga",
+    "pixnet",
+    "plurk",
+    "pornhub",
+    "pururin",
+    "reactor",
     "readcomiconline",
-    "rebeccablacktech",
     "reddit",
-    "rule34",
-    "safebooru",
+    "redgifs",
     "sankaku",
-    "seaotterscans",
+    "sankakucomplex",
     "seiga",
     "senmanga",
-    "sensescans",
+    "sexcom",
     "simplyhentai",
+    "slickpic",
     "slideshare",
     "smugmug",
-    "thebarchive",
+    "speakerdeck",
+    "subscribestar",
+    "tsumino",
     "tumblr",
     "twitter",
+    "vanillarock",
+    "vsco",
     "wallhaven",
     "warosu",
-    "worldthree",
-    "yandere",
+    "weasyl",
+    "webtoons",
+    "weibo",
+    "wikiart",
+    "xhamster",
     "xvideos",
     "yuki",
+    "booru",
+    "moebooru",
+    "foolfuuka",
+    "foolslide",
+    "mastodon",
+    "shopify",
     "imagehosts",
     "directlink",
     "recursive",
@@ -105,76 +133,60 @@ modules = [
 
 
 def find(url):
-    """Find suitable extractor for the given url"""
-    for pattern, klass in _list_patterns():
-        match = pattern.match(url)
-        if match and klass not in _blacklist:
-            return klass(match)
+    """Find a suitable extractor for the given URL"""
+    for cls in _list_classes():
+        match = cls.pattern.match(url)
+        if match:
+            return cls(match)
     return None
 
 
-def add(klass):
-    """Add 'klass' to the list of available extractors"""
-    for pattern in klass.pattern:
-        _cache.append((re.compile(pattern), klass))
+def add(cls):
+    """Add 'cls' to the list of available extractors"""
+    cls.pattern = re.compile(cls.pattern)
+    _cache.append(cls)
+    return cls
 
 
 def add_module(module):
     """Add all extractors in 'module' to the list of available extractors"""
-    tuples = [
-        (re.compile(pattern), klass)
-        for klass in _get_classes(module)
-        for pattern in klass.pattern
-    ]
-    _cache.extend(tuples)
-    return tuples
+    classes = _get_classes(module)
+    for cls in classes:
+        cls.pattern = re.compile(cls.pattern)
+    _cache.extend(classes)
+    return classes
 
 
 def extractors():
     """Yield all available extractor classes"""
     return sorted(
-        set(klass for _, klass in _list_patterns()),
+        _list_classes(),
         key=lambda x: x.__name__
     )
-
-
-class blacklist():
-    """Context Manager to blacklist extractor modules"""
-    def __init__(self, categories, extractors=None):
-        self.extractors = extractors or []
-        for _, klass in _list_patterns():
-            if klass.category in categories:
-                self.extractors.append(klass)
-
-    def __enter__(self):
-        _blacklist.update(self.extractors)
-
-    def __exit__(self, etype, value, traceback):
-        _blacklist.clear()
 
 
 # --------------------------------------------------------------------
 # internals
 
 _cache = []
-_blacklist = set()
 _module_iter = iter(modules)
 
 
-def _list_patterns():
-    """Yield all available (pattern, class) tuples"""
+def _list_classes():
+    """Yield all available extractor classes"""
     yield from _cache
 
     for module_name in _module_iter:
-        yield from add_module(
-            importlib.import_module("."+module_name, __package__)
-        )
+        module = importlib.import_module("."+module_name, __package__)
+        yield from add_module(module)
+
+    globals()["_list_classes"] = lambda : _cache
 
 
 def _get_classes(module):
     """Return a list of all extractor classes in a module"""
     return [
-        klass for klass in module.__dict__.values() if (
-            hasattr(klass, "pattern") and klass.__module__ == module.__name__
+        cls for cls in module.__dict__.values() if (
+            hasattr(cls, "pattern") and cls.__module__ == module.__name__
         )
     ]

@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2016-2018 Mike Fährmann
+# Copyright 2016-2020 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
 # published by the Free Software Foundation.
 
-"""Extract images from http://seiga.nicovideo.jp"""
+"""Extract images from https://seiga.nicovideo.jp/"""
 
 from .common import Extractor, Message
 from .. import text, util, exception
@@ -18,9 +18,10 @@ class SeigaExtractor(Extractor):
     category = "seiga"
     archive_fmt = "{image_id}"
     cookiedomain = ".nicovideo.jp"
+    root = "https://seiga.nicovideo.jp"
 
-    def __init__(self):
-        Extractor.__init__(self)
+    def __init__(self, match):
+        Extractor.__init__(self, match)
         self.start_image = 0
 
     def items(self):
@@ -40,25 +41,27 @@ class SeigaExtractor(Extractor):
 
     def get_image_url(self, image_id):
         """Get url for an image with id 'image_id'"""
-        url = "http://seiga.nicovideo.jp/image/source/{}".format(image_id)
+        url = "{}/image/source/{}".format(self.root, image_id)
         response = self.request(
-            url, method="HEAD", allow_redirects=False, expect=(404,))
-        if response.status_code == 404:
-            raise exception.NotFoundError("image")
+            url, method="HEAD", allow_redirects=False, notfound="image")
         return response.headers["Location"].replace("/o/", "/priv/", 1)
 
     def login(self):
         """Login and set necessary cookies"""
         if not self._check_cookies(("user_session",)):
             username, password = self._get_auth_info()
-            self.session.cookies = self._login_impl(username, password)
+            self._update_cookies(self._login_impl(username, password))
 
-    @cache(maxage=7*24*60*60, keyarg=1)
+    @cache(maxage=7*24*3600, keyarg=1)
     def _login_impl(self, username, password):
-        """Actual login implementation"""
+        if not username or not password:
+            raise exception.AuthenticationError(
+                "Username and password required")
+
         self.log.info("Logging in as %s", username)
         url = "https://account.nicovideo.jp/api/v1/login"
         data = {"mail_tel": username, "password": password}
+
         self.request(url, method="POST", data=data)
         if "user_session" not in self.session.cookies:
             raise exception.AuthenticationError()
@@ -69,12 +72,12 @@ class SeigaExtractor(Extractor):
 class SeigaUserExtractor(SeigaExtractor):
     """Extractor for images of a user from seiga.nicovideo.jp"""
     subcategory = "user"
-    directory_fmt = ["{category}", "{user[id]}"]
+    directory_fmt = ("{category}", "{user[id]}")
     filename_fmt = "{category}_{user[id]}_{image_id}.{extension}"
-    pattern = [(r"(?:https?://)?(?:www\.|seiga\.)?nicovideo\.jp/"
-                r"user/illust/(\d+)(?:\?(?:[^&]+&)*sort=([^&#]+))?")]
-    test = [
-        ("http://seiga.nicovideo.jp/user/illust/39537793", {
+    pattern = (r"(?:https?://)?(?:www\.|(?:sp\.)?seiga\.)?nicovideo\.jp/"
+               r"user/illust/(\d+)(?:\?(?:[^&]+&)*sort=([^&#]+))?")
+    test = (
+        ("https://seiga.nicovideo.jp/user/illust/39537793", {
             "pattern": r"https://lohas\.nicoseiga\.jp/priv/[0-9a-f]+/\d+/\d+",
             "count": ">= 4",
             "keyword": {
@@ -92,15 +95,16 @@ class SeigaUserExtractor(SeigaExtractor):
                 "views": int,
             },
         }),
-        ("http://seiga.nicovideo.jp/user/illust/79433", {
+        ("https://seiga.nicovideo.jp/user/illust/79433", {
             "exception": exception.NotFoundError,
         }),
-        (("http://seiga.nicovideo.jp/user/illust/39537793"
-          "?sort=image_view&target=illust_all"), None),
-    ]
+        ("https://seiga.nicovideo.jp/user/illust/39537793"
+         "?sort=image_view&target=illust_all"),
+        ("https://sp.seiga.nicovideo.jp/user/illust/39537793"),
+    )
 
     def __init__(self, match):
-        SeigaExtractor.__init__(self)
+        SeigaExtractor.__init__(self, match)
         self.user_id, self.order = match.groups()
         self.start_page = 1
 
@@ -132,7 +136,7 @@ class SeigaUserExtractor(SeigaExtractor):
         }
 
     def get_images(self):
-        url = "http://seiga.nicovideo.jp/user/illust/" + self.user_id
+        url = "{}/user/illust/{}".format(self.root, self.user_id)
         params = {"sort": self.order, "page": self.start_page,
                   "target": "illust_all"}
 
@@ -166,22 +170,29 @@ class SeigaImageExtractor(SeigaExtractor):
     """Extractor for single images from seiga.nicovideo.jp"""
     subcategory = "image"
     filename_fmt = "{category}_{image_id}.{extension}"
-    pattern = [(r"(?:https?://)?(?:www\.|seiga\.)?nicovideo\.jp/"
-                r"(?:seiga/im|image/source/)(\d+)"),
-               (r"(?:https?://)?lohas\.nicoseiga\.jp/"
-                r"(?:priv|o)/[^/]+/\d+/(\d+)")]
-    test = [
-        ("http://seiga.nicovideo.jp/seiga/im5977527", {
-            "keyword": "f66ba5de33d4ce2cb57f23bb37e1e847e0771c10",
+    pattern = (r"(?:https?://)?(?:"
+               r"(?:seiga\.|www\.)?nicovideo\.jp/(?:seiga/im|image/source/)"
+               r"|sp\.seiga\.nicovideo\.jp/seiga/#!/im"
+               r"|lohas\.nicoseiga\.jp/(?:thumb|(?:priv|o)/[^/]+/\d+)/)(\d+)")
+    test = (
+        ("https://seiga.nicovideo.jp/seiga/im5977527", {
+            "keyword": "c8339781da260f7fc44894ad9ada016f53e3b12a",
             "content": "d9202292012178374d57fb0126f6124387265297",
         }),
-        ("http://seiga.nicovideo.jp/seiga/im123", {
+        ("https://seiga.nicovideo.jp/seiga/im123", {
             "exception": exception.NotFoundError,
         }),
-    ]
+        ("https://seiga.nicovideo.jp/image/source/5977527"),
+        ("https://sp.seiga.nicovideo.jp/seiga/#!/im5977527"),
+        ("https://lohas.nicoseiga.jp/thumb/5977527i"),
+        ("https://lohas.nicoseiga.jp/priv"
+         "/759a4ef1c639106ba4d665ee6333832e647d0e4e/1549727594/5977527"),
+        ("https://lohas.nicoseiga.jp/o"
+         "/759a4ef1c639106ba4d665ee6333832e647d0e4e/1549727594/5977527"),
+    )
 
     def __init__(self, match):
-        SeigaExtractor.__init__(self)
+        SeigaExtractor.__init__(self, match)
         self.image_id = match.group(1)
 
     def skip(self, num):
@@ -189,4 +200,23 @@ class SeigaImageExtractor(SeigaExtractor):
         return num
 
     def get_images(self):
-        return ({}, {"image_id": text.parse_int(self.image_id)})
+        url = "{}/seiga/im{}".format(self.root, self.image_id)
+        page = self.request(url, notfound="image").text
+
+        data = text.extract_all(page, (
+            ("date"        , '<li class="date"><span class="created">', '<'),
+            ("title"       , '<h1 class="title">', '</h1>'),
+            ("description" , '<p class="discription">', '</p>'),
+        ))[0]
+
+        data["user"] = text.extract_all(page, (
+            ("id"  , '<a href="/user/illust/' , '"'),
+            ("name", '<span itemprop="title">', '<'),
+        ))[0]
+
+        data["description"] = text.remove_html(data["description"])
+        data["image_id"] = text.parse_int(self.image_id)
+        data["date"] = text.parse_datetime(
+            data["date"] + ":00+0900", "%Y年%m月%d日 %H:%M:%S%z")
+
+        return (data, data)

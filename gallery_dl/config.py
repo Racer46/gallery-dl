@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Copyright 2015-2018 Mike Fährmann
+# Copyright 2015-2020 Mike Fährmann
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 as
@@ -22,28 +22,34 @@ log = logging.getLogger("config")
 
 _config = {}
 
-if os.name == "nt":
+if util.WINDOWS:
     _default_configs = [
+        r"%APPDATA%\gallery-dl\config.json",
         r"%USERPROFILE%\gallery-dl\config.json",
         r"%USERPROFILE%\gallery-dl.conf",
     ]
 else:
     _default_configs = [
         "/etc/gallery-dl.conf",
-        "${HOME}/.config/gallery/config.json",
         "${HOME}/.config/gallery-dl/config.json",
         "${HOME}/.gallery-dl.conf",
     ]
 
 
+if getattr(sys, "frozen", False):
+    # look for config file in PyInstaller executable directory (#682)
+    _default_configs.append(os.path.join(
+        os.path.dirname(sys.executable),
+        "gallery-dl.conf",
+    ))
+
+
 # --------------------------------------------------------------------
 # public interface
 
-def load(*files, format="json", strict=False):
+def load(files=None, strict=False, fmt="json"):
     """Load JSON configuration files"""
-    configfiles = files or _default_configs
-
-    if format == "yaml":
+    if fmt == "yaml":
         try:
             import yaml
             parsefunc = yaml.safe_load
@@ -53,23 +59,24 @@ def load(*files, format="json", strict=False):
     else:
         parsefunc = json.load
 
-    for conf in configfiles:
+    for path in files or _default_configs:
+        path = util.expand_path(path)
         try:
-            path = util.expand_path(conf)
             with open(path, encoding="utf-8") as file:
                 confdict = parsefunc(file)
+        except OSError as exc:
+            if strict:
+                log.error(exc)
+                sys.exit(1)
+        except Exception as exc:
+            log.warning("Could not parse '%s': %s", path, exc)
+            if strict:
+                sys.exit(2)
+        else:
             if not _config:
                 _config.update(confdict)
             else:
                 util.combine_dict(_config, confdict)
-        except FileNotFoundError:
-            if strict:
-                log.error("Configuration file '%s' not found", path)
-                sys.exit(1)
-        except Exception as exc:
-            log.warning("Could not parse '%s':  %s", path, exc)
-            if strict:
-                sys.exit(2)
 
 
 def clear():
@@ -77,81 +84,126 @@ def clear():
     _config.clear()
 
 
-def get(keys, default=None, conf=_config):
+def get(path, key, default=None, *, conf=_config):
     """Get the value of property 'key' or a default value"""
     try:
-        for k in keys:
-            conf = conf[k]
-        return conf
-    except (KeyError, AttributeError):
+        for p in path:
+            conf = conf[p]
+        return conf[key]
+    except Exception:
         return default
 
 
-def interpolate(keys, default=None, conf=_config):
+def interpolate(path, key, default=None, *, conf=_config):
     """Interpolate the value of 'key'"""
+    if key in conf:
+        return conf[key]
     try:
-        lkey = keys[-1]
-        if lkey in conf:
-            return conf[lkey]
-        for k in keys:
-            if lkey in conf:
-                default = conf[lkey]
-            conf = conf[k]
-        return conf
-    except (KeyError, AttributeError):
+        for p in path:
+            conf = conf[p]
+            if key in conf:
+                default = conf[key]
+    except Exception:
+        pass
+    return default
+
+
+def interpolate_common(common, paths, key, default=None, *, conf=_config):
+    """Interpolate the value of 'key'
+    using multiple 'paths' along a 'common' ancestor
+    """
+    if key in conf:
+        return conf[key]
+
+    # follow the common path
+    try:
+        for p in common:
+            conf = conf[p]
+            if key in conf:
+                default = conf[key]
+    except Exception:
         return default
 
+    # try all paths until a value is found
+    value = util.SENTINEL
+    for path in paths:
+        c = conf
+        try:
+            for p in path:
+                c = c[p]
+                if key in c:
+                    value = c[key]
+        except Exception:
+            pass
+        if value is not util.SENTINEL:
+            return value
+    return default
 
-def set(keys, value, conf=_config):
+
+def accumulate(path, key, *, conf=_config):
+    """Accumulate the values of 'key' along 'path'"""
+    result = []
+    try:
+        if key in conf:
+            value = conf[key]
+            if value:
+                result.extend(value)
+        for p in path:
+            conf = conf[p]
+            if key in conf:
+                value = conf[key]
+                if value:
+                    result[:0] = value
+    except Exception:
+        pass
+    return result
+
+
+def set(path, key, value, *, conf=_config):
     """Set the value of property 'key' for this session"""
-    for k in keys[:-1]:
+    for p in path:
         try:
-            conf = conf[k]
+            conf = conf[p]
         except KeyError:
-            temp = {}
-            conf[k] = temp
-            conf = temp
-    conf[keys[-1]] = value
+            conf[p] = conf = {}
+    conf[key] = value
 
 
-def setdefault(keys, value, conf=_config):
+def setdefault(path, key, value, *, conf=_config):
     """Set the value of property 'key' if it doesn't exist"""
-    for k in keys[:-1]:
+    for p in path:
         try:
-            conf = conf[k]
+            conf = conf[p]
         except KeyError:
-            temp = {}
-            conf[k] = temp
-            conf = temp
-    return conf.setdefault(keys[-1], value)
+            conf[p] = conf = {}
+    return conf.setdefault(key, value)
 
 
-def unset(keys, conf=_config):
+def unset(path, key, *, conf=_config):
     """Unset the value of property 'key'"""
     try:
-        for k in keys[:-1]:
-            conf = conf[k]
-        del conf[keys[-1]]
-    except (KeyError, AttributeError):
+        for p in path:
+            conf = conf[p]
+        del conf[key]
+    except Exception:
         pass
 
 
 class apply():
-    """Context Manager to temporarily apply a collection of key-value pairs"""
-    _sentinel = object()
+    """Context Manager: apply a collection of key-value pairs"""
 
     def __init__(self, kvlist):
         self.original = []
         self.kvlist = kvlist
 
     def __enter__(self):
-        for key, value in self.kvlist:
-            self.original.append((key, get(key, self._sentinel)))
-            set(key, value)
+        for path, key, value in self.kvlist:
+            self.original.append((path, key, get(path, key, util.SENTINEL)))
+            set(path, key, value)
 
     def __exit__(self, etype, value, traceback):
-        for key, value in self.original:
-            if value is self._sentinel:
-                unset(key)
+        for path, key, value in self.original:
+            if value is util.SENTINEL:
+                unset(path, key)
             else:
-                set(key, value)
+                set(path, key, value)
